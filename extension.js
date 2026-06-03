@@ -47,20 +47,33 @@ function isLineDelimited(document) {
 
 function parseDocument(document) {
   const text = document.getText();
+  const offsets = new Map();
 
   if (isLineDelimited(document)) {
-    const records = [];
     const errors = [];
-    const lines = text.split(/\r?\n/);
-    lines.forEach((line, i) => {
-      if (line.trim() === "") return;
+    const lineStarts = [0];
+    for (let k = 0; k < text.length; k++) {
+      if (text[k] === "\n") lineStarts.push(k + 1);
+    }
+    const children = [];
+    let rec = 0;
+    for (let li = 0; li < lineStarts.length; li++) {
+      const start = lineStarts[li];
+      const end = li + 1 < lineStarts.length ? lineStarts[li + 1] : text.length;
+      const line = text.slice(start, end);
+      if (line.trim() === "") continue;
       try {
-        records.push(JSON.parse(line));
+        JSON.parse(line); // validity gate; tree/values come from parseToTree
       } catch (e) {
-        errors.push({ line: i + 1, message: e.message });
+        errors.push({ line: li + 1, message: e.message });
+        continue;
       }
-    });
-    if (records.length === 0 && errors.length > 0) {
+      const node = parseToTree(line);
+      fillOffsets(node, "$[" + rec + "]", start, offsets);
+      children.push(leanNode(node));
+      rec++;
+    }
+    if (children.length === 0) {
       return {
         ok: false,
         error:
@@ -68,14 +81,24 @@ function parseDocument(document) {
           errors.map((e) => `line ${e.line}: ${e.message}`).join("\n"),
       };
     }
-    return { ok: true, data: records, jsonl: true, errors };
+    offsets.set("$", { key: 0, val: 0, end: text.length });
+    return {
+      ok: true,
+      tree: { t: "array", c: children },
+      jsonl: true,
+      errors,
+      offsets,
+    };
   }
 
   try {
-    return { ok: true, data: JSON.parse(text), jsonl: false };
+    JSON.parse(text); // validity gate
   } catch (e) {
     return { ok: false, error: e.message };
   }
+  const root = parseToTree(text);
+  fillOffsets(root, "$", 0, offsets);
+  return { ok: true, tree: leanNode(root), jsonl: false, offsets };
 }
 
 function openViewer(context, document) {
@@ -107,11 +130,15 @@ function openViewer(context, document) {
 
   const post = () => {
     const parsed = parseDocument(document);
-    offsetMap = parsed.ok ? computeOffsets(document) : new Map();
+    offsetMap = parsed.ok ? parsed.offsets : new Map();
     panel.webview.postMessage({
       type: "load",
       name: path.basename(document.fileName),
-      ...parsed,
+      ok: parsed.ok,
+      tree: parsed.tree,
+      jsonl: parsed.jsonl,
+      errors: parsed.errors,
+      error: parsed.error,
     });
   };
 
@@ -126,6 +153,15 @@ function openViewer(context, document) {
           `JSON Viewer: copied ${msg.label}`,
           2000
         );
+      } else if (msg.type === "copyRaw" && typeof msg.path === "string") {
+        // Branch "copy value": slice the exact source substring from the file.
+        const entry = offsetMap.get(msg.path);
+        if (entry) {
+          vscode.env.clipboard.writeText(
+            document.getText().slice(entry.val, entry.end)
+          );
+          vscode.window.setStatusBarMessage("JSON Viewer: copied value", 2000);
+        }
       } else if (msg.type === "reveal" && typeof msg.path === "string") {
         const entry = offsetMap.get(msg.path);
         if (entry) {
@@ -180,18 +216,21 @@ async function revealOffset(document, start, end) {
   );
 }
 
-// A position-tracking JSON parser. Returns the parsed value plus a Map of
-// path -> { key, val, end } character offsets, using the SAME path scheme the
-// webview builds ($ root, .member, [index]). Used only to locate source text;
-// the displayed data still comes from JSON.parse for correctness.
+// JSON keys that are valid identifiers are shown unquoted in paths; others are
+// JSON-quoted. Must stay identical to escapeKey() in the webview client.
 function escapeKeyExt(k) {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k) ? k : JSON.stringify(k);
 }
 
-function parseWithPositions(text) {
+// Parse `text` into a node tree that carries the EXACT source substring (`raw`)
+// of every value. This is the single source of truth for what the viewer shows
+// and copies — we never round-trip values through JSON.parse for display, since
+// that is lossy for numbers (precision past 2^53, -0, trailing zeros, exponent
+// form). Each node: { type, raw, value?, key?, keyStart, valStart, valEnd,
+// children? } with offsets relative to `text`.
+function parseToTree(text) {
   let i = 0;
   const n = text.length;
-  const offsets = new Map();
 
   const skipWs = () => {
     while (i < n) {
@@ -222,12 +261,14 @@ function parseWithPositions(text) {
     return s;
   };
 
-  const parseValue = (path) => {
+  const parseValue = () => {
     skipWs();
+    const valStart = i;
     const c = text[i];
-    let value;
+    const node = {};
     if (c === "{") {
-      value = {};
+      node.type = "object";
+      node.children = [];
       i++; skipWs();
       if (text[i] === "}") { i++; }
       else {
@@ -238,10 +279,10 @@ function parseWithPositions(text) {
           skipWs();
           if (text[i] === ":") i++;
           skipWs();
-          const childPath = path + "." + escapeKeyExt(k);
-          const valStart = i;
-          value[k] = parseValue(childPath);
-          offsets.set(childPath, { key: keyStart, val: valStart, end: i });
+          const child = parseValue();
+          child.key = k;
+          child.keyStart = keyStart;
+          node.children.push(child);
           skipWs();
           if (text[i] === ",") { i++; continue; }
           if (text[i] === "}") { i++; break; }
@@ -249,18 +290,16 @@ function parseWithPositions(text) {
         }
       }
     } else if (c === "[") {
-      value = [];
+      node.type = "array";
+      node.children = [];
       i++; skipWs();
       if (text[i] === "]") { i++; }
       else {
-        let idx = 0;
         while (i < n) {
           skipWs();
-          const childPath = path + "[" + idx + "]";
-          const valStart = i;
-          value.push(parseValue(childPath));
-          offsets.set(childPath, { key: valStart, val: valStart, end: i });
-          idx++;
+          const child = parseValue();
+          child.keyStart = child.valStart;
+          node.children.push(child);
           skipWs();
           if (text[i] === ",") { i++; continue; }
           if (text[i] === "]") { i++; break; }
@@ -268,59 +307,59 @@ function parseWithPositions(text) {
         }
       }
     } else if (c === '"') {
-      value = parseString();
-    } else if (c === "t") { value = true; i += 4; }
-    else if (c === "f") { value = false; i += 5; }
-    else if (c === "n") { value = null; i += 4; }
+      node.type = "string";
+      node.value = parseString();
+    } else if (c === "t") { node.type = "boolean"; node.value = true; i += 4; }
+    else if (c === "f") { node.type = "boolean"; node.value = false; i += 5; }
+    else if (c === "n") { node.type = "null"; node.value = null; i += 4; }
     else {
+      node.type = "number";
       let j = i;
       while (j < n && "-+0123456789.eE".indexOf(text[j]) >= 0) j++;
-      value = Number(text.slice(i, j));
+      node.value = Number(text.slice(i, j));
       i = j;
     }
-    return value;
+    node.valStart = valStart;
+    node.valEnd = i;
+    node.raw = text.slice(valStart, i);
+    return node;
   };
 
   skipWs();
-  const rootStart = i;
-  const value = parseValue("$");
-  offsets.set("$", { key: rootStart, val: rootStart, end: i });
-  return { value, offsets };
+  const root = parseValue();
+  root.keyStart = root.valStart;
+  return root;
 }
 
-// Build the full path -> offsets map for a document (handles JSON and JSONL).
-function computeOffsets(document) {
-  const text = document.getText();
-  const map = new Map();
-  try {
-    if (isLineDelimited(document)) {
-      const lineStarts = [0];
-      for (let k = 0; k < text.length; k++) {
-        if (text[k] === "\n") lineStarts.push(k + 1);
-      }
-      let rec = 0;
-      for (let li = 0; li < lineStarts.length; li++) {
-        const start = lineStarts[li];
-        const end = li + 1 < lineStarts.length ? lineStarts[li + 1] : text.length;
-        const line = text.slice(start, end);
-        if (line.trim() === "") continue;
-        try { JSON.parse(line); } catch (e) { continue; } // keep indices in sync
-        const res = parseWithPositions(line);
-        const recPath = "$[" + rec + "]";
-        res.offsets.forEach((o, p) => {
-          const shifted = { key: start + o.key, val: start + o.val, end: start + o.end };
-          map.set(p === "$" ? recPath : recPath + p.slice(1), shifted);
-        });
-        rec++;
-      }
-      map.set("$", { key: 0, val: 0, end: 0 });
-    } else {
-      parseWithPositions(text).offsets.forEach((o, p) => map.set(p, o));
+// Reduce a parsed node to the minimal shape sent to the webview: type (t), key
+// (k), and either children (c) or a leaf's exact raw source (r) + decoded value
+// (v). Branches carry no raw — copying a whole object/array is sliced from the
+// source on demand via its offset, so payload stays ~= file size, not O(depth).
+function leanNode(node) {
+  const out = { t: node.type };
+  if (node.key !== undefined) out.k = node.key;
+  if (node.children) out.c = node.children.map(leanNode);
+  else { out.r = node.raw; out.v = node.value; }
+  return out;
+}
+
+// Walk a parsed node filling `map` with path -> {key,val,end} absolute offsets,
+// using the SAME path scheme as the webview ($ root, .member, [index]).
+function fillOffsets(node, path, base, map) {
+  map.set(path, {
+    key: base + node.keyStart,
+    val: base + node.valStart,
+    end: base + node.valEnd,
+  });
+  if (node.type === "object") {
+    for (const ch of node.children) {
+      fillOffsets(ch, path + "." + escapeKeyExt(ch.key), base, map);
     }
-  } catch (e) {
-    // Best-effort: if anything goes wrong, jump simply won't fire.
+  } else if (node.type === "array") {
+    node.children.forEach((ch, idx) =>
+      fillOffsets(ch, path + "[" + idx + "]", base, map)
+    );
   }
-  return map;
 }
 
 function getHtml(webview, autoExpandDepth) {
@@ -501,36 +540,31 @@ const matchCountEl = document.getElementById("matchCount");
 let model = null;       // root node
 let filterText = "";
 
-function typeOf(v) {
-  if (v === null) return "null";
-  if (Array.isArray(v)) return "array";
-  return typeof v; // object, string, number, boolean
-}
-
-// Build a lightweight node model with stable ids and parent links so we can
-// expand/collapse and filter without re-walking the raw data each render.
+// Wrap the lean tree from the extension (nodes: {t,r,k?,v?,c?}) into the render
+// model, adding stable ids, depth, paths, and expand state. The raw source text
+// (node.raw) is preserved untouched so display/copy are byte-faithful to file.
 let idSeq = 0;
-function build(value, key, path, depth) {
-  const t = typeOf(value);
+function wrap(n, key, path, depth) {
   const node = {
     id: ++idSeq,
     key,
     path,
-    type: t,
-    value,
+    type: n.t,
+    raw: n.r,
+    value: n.v, // leaves: decoded primitive (string/bool/null) or parsed number
     depth,
     children: null,
     expanded: depth < AUTO_EXPAND_DEPTH,
   };
-  if (t === "object") {
-    node.children = Object.keys(value).map((k) =>
-      build(value[k], k, path + "." + escapeKey(k), depth + 1)
+  if (n.t === "object") {
+    node.children = n.c.map((ch) =>
+      wrap(ch, ch.k, path + "." + escapeKey(ch.k), depth + 1)
     );
-  } else if (t === "array") {
+  } else if (n.t === "array") {
     // Zero-pad indices so a list reads 000, 001, … 010 like PyCharm's view.
-    const pad = String(Math.max(0, value.length - 1)).length;
-    node.children = value.map((v, i) =>
-      build(v, String(i).padStart(pad, "0"), path + "[" + i + "]", depth + 1)
+    const pad = String(Math.max(0, n.c.length - 1)).length;
+    node.children = n.c.map((ch, i) =>
+      wrap(ch, String(i).padStart(pad, "0"), path + "[" + i + "]", depth + 1)
     );
   }
   return node;
@@ -538,6 +572,16 @@ function build(value, key, path, depth) {
 
 function escapeKey(k) {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k) ? k : JSON.stringify(k);
+}
+
+function isBranchNode(node) {
+  return node.type === "object" || node.type === "array";
+}
+
+// int vs float is decided from the RAW source token, not the parsed number, so
+// "100.00" reads {float} and a 30-digit integer reads {int}.
+function numKind(node) {
+  return /[.eE]/.test(node.raw) ? "float" : "int";
 }
 
 // Python-style type name, to mirror PyCharm's {dict} / {list} / {str} labels.
@@ -548,52 +592,56 @@ function pyType(node) {
     case "string": return "str";
     case "boolean": return "bool";
     case "null": return "NoneType";
-    case "number": return Number.isInteger(node.value) ? "int" : "float";
+    case "number": return numKind(node);
   }
   return node.type;
 }
 
-// Python-style value rendering for leaf rows: 'text', True/False, None, numbers.
+// Leaf display. Numbers show their EXACT source text (no precision loss / no
+// reformatting); strings show the decoded text in single quotes (truncated for
+// display only — copy always uses the full raw source).
 function pyValue(node) {
+  if (node.type === "number") return node.raw;
   if (node.type === "string") {
     const s = "'" + node.value + "'";
     return s.length > 200 ? s.slice(0, 199) + "…'" : s;
   }
   if (node.type === "boolean") return node.value ? "True" : "False";
   if (node.type === "null") return "None";
-  return String(node.value);
-}
-
-function typeName(v) {
-  const t = typeOf(v);
-  if (t === "number") return Number.isInteger(v) ? "int" : "float";
-  return { object: "dict", array: "list", string: "str", boolean: "bool", null: "NoneType" }[t];
+  return node.raw;
 }
 
 // "Copy structure": replace every leaf value with its type name, and collapse
 // arrays to a single representative element, producing a shape/skeleton.
-function skeleton(v) {
-  const t = typeOf(v);
-  if (t === "object") {
+function skeleton(node) {
+  if (node.type === "object") {
     const o = {};
-    for (const k of Object.keys(v)) o[k] = skeleton(v[k]);
+    for (const c of node.children) o[c.key] = skeleton(c);
     return o;
   }
-  if (t === "array") return v.length ? [skeleton(v[0])] : [];
-  return typeName(v);
+  if (node.type === "array") {
+    return node.children.length ? [skeleton(node.children[0])] : [];
+  }
+  return node.type === "number"
+    ? numKind(node)
+    : { string: "str", boolean: "bool", null: "NoneType" }[node.type];
 }
 
 function copyStructure(node) {
-  const isBranch = node.type === "object" || node.type === "array";
-  const skel = skeleton(node.value);
-  const out = isBranch ? JSON.stringify(skel, null, 2) : String(skel);
+  const skel = skeleton(node);
+  const out = isBranchNode(node) ? JSON.stringify(skel, null, 2) : String(skel);
   vscode.postMessage({ type: "copy", value: out, label: "structure" });
 }
 
+// Copy the EXACT source text of the value — byte-for-byte identical to the
+// file. Leaves carry their raw text; branches are sliced from source by the
+// extension (it holds the offset map) to avoid shipping duplicated text.
 function copyNodeValue(node) {
-  const isBranch = node.type === "object" || node.type === "array";
-  const v = isBranch ? JSON.stringify(node.value, null, 2) : String(node.value);
-  vscode.postMessage({ type: "copy", value: v, label: "value" });
+  if (node.raw !== undefined) {
+    vscode.postMessage({ type: "copy", value: node.raw, label: "value" });
+  } else {
+    vscode.postMessage({ type: "copyRaw", path: node.path });
+  }
 }
 
 function jumpTo(node, which) {
@@ -648,8 +696,9 @@ function showMenu(x, y, node) {
 function nodeMatches(node, q) {
   if (!q) return true;
   if (String(node.key).toLowerCase().includes(q)) return true;
-  if (node.type !== "object" && node.type !== "array") {
-    return String(node.value).toLowerCase().includes(q);
+  if (!isBranchNode(node)) {
+    if (node.raw && node.raw.toLowerCase().includes(q)) return true;
+    if (node.value != null && String(node.value).toLowerCase().includes(q)) return true;
   }
   return false;
 }
@@ -783,7 +832,7 @@ window.addEventListener("message", (event) => {
       return;
     }
     idSeq = 0;
-    model = build(msg.data, msg.name || "root", "$", 0);
+    model = wrap(msg.tree, msg.name || "root", "$", 0);
     model.expanded = true;
     statusEl.innerHTML = "";
 

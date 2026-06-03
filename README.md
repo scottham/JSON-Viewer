@@ -25,6 +25,11 @@ source; the text editor stays exactly as it was.
   A flat, expandable indented list — not a node graph.
 - **Root matches the data shape**: a JSON file opens as a `dict` (object) at the
   root; a JSONL file opens as a `list` of `dict` records.
+- **Byte-faithful values**: displayed and copied values come from the exact
+  source text, never from a re-serialized `JSON.parse` result. Large integers
+  (beyond 2⁵³), `-0`, trailing zeros (`100.00`), and exponent forms (`6.022e23`)
+  are shown and copied exactly as written — no precision loss or reformatting.
+  Copying a whole object/array yields its exact source substring.
 - **JSONL / NDJSON support**: each line is parsed as its own record and shown as
   a **list of dicts** (like PyCharm's dict-list view). A malformed line is
   reported and skipped instead of blanking the whole panel.
