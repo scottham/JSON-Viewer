@@ -1,0 +1,81 @@
+{
+  "name": "json-viewer",
+  "displayName": "JSON Viewer",
+  "description": "View JSON/dict files as an interactive, expandable variable-inspector tree — like PyCharm's debugger inspector.",
+  "version": "0.1.0",
+  "publisher": "prokids",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/scottham/JSON-Viewer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/scottham/JSON-Viewer/issues"
+  },
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "keywords": [
+    "json",
+    "viewer",
+    "inspector",
+    "tree",
+    "dict",
+    "pycharm"
+  ],
+  "activationEvents": [
+    "onCommand:jsonViewer.open"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "jsonViewer.open",
+        "title": "Open with JSON Viewer",
+        "category": "JSON Viewer",
+        "icon": "$(list-tree)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "jsonViewer.open",
+          "when": "resourceExtname == .json || resourceExtname == .jsonc || resourceExtname == .jsonl || resourceExtname == .ndjson",
+          "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "jsonViewer.open",
+          "when": "resourceExtname == .json || resourceExtname == .jsonc || resourceExtname == .jsonl || resourceExtname == .ndjson",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "jsonViewer.open",
+          "when": "resourceExtname == .json || resourceExtname == .jsonc || resourceExtname == .jsonl || resourceExtname == .ndjson"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "JSON Viewer",
+      "properties": {
+        "jsonViewer.autoExpandDepth": {
+          "type": "number",
+          "default": 2,
+          "description": "Levels of the tree to auto-expand when the viewer opens."
+        },
+        "jsonViewer.liveUpdate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Re-parse and refresh the viewer as the underlying document changes."
+        }
+      }
+    }
+  }
+}

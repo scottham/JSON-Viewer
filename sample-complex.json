@@ -1,0 +1,1049 @@
+{
+  "$schema": "https://example.com/schemas/complex.v3.json",
+  "meta": {
+    "generatedAt": "2024-06-03T00:00:00.000Z",
+    "version": "3.14.159",
+    "pi": 3.141592653589793,
+    "bigNumber": 9007199254740991,
+    "negativeZero": 0,
+    "floats": {
+      "tiny": 1e-12,
+      "huge": 1.7976931348623157e+308,
+      "exp": 6.022e+23
+    },
+    "unicode": {
+      "emoji": "🚀🌍✨",
+      "cjk": "你好，世界",
+      "rtl": "مرحبا بالعالم",
+      "mixed": "café—naïve—Zoë"
+    },
+    "booleans": [
+      true,
+      false,
+      true
+    ],
+    "nullField": null,
+    "emptyObject": {},
+    "emptyArray": [],
+    "emptyString": "",
+    "escapes": "quotes \" backslash \\\\ tab\\ttab newline\\nline"
+  },
+  "config": {
+    "server": {
+      "host": "0.0.0.0",
+      "port": 8443,
+      "tls": {
+        "enabled": true,
+        "ciphers": [
+          "TLS_AES_256",
+          "TLS_CHACHA20"
+        ],
+        "minVersion": "1.3"
+      },
+      "cors": {
+        "origins": [
+          "https://app.example.com",
+          "*"
+        ],
+        "methods": [
+          "GET",
+          "POST",
+          "PATCH"
+        ],
+        "credentials": true
+      },
+      "limits": {
+        "maxBodyBytes": 1048576,
+        "rateLimit": {
+          "window": 60,
+          "max": 1000,
+          "burst": 50
+        }
+      }
+    },
+    "database": {
+      "primary": {
+        "driver": "postgres",
+        "dsn": "postgres://user:***@db:5432/app",
+        "pool": {
+          "min": 2,
+          "max": 20,
+          "idleMs": 30000
+        }
+      },
+      "replicas": [
+        {
+          "region": "eu-central",
+          "weight": 0.5,
+          "lagMs": 12
+        },
+        {
+          "region": "us-east",
+          "weight": 0.3,
+          "lagMs": 84
+        },
+        {
+          "region": "ap-northeast",
+          "weight": 0.2,
+          "lagMs": 153
+        }
+      ],
+      "cache": {
+        "kind": "redis",
+        "nodes": [
+          "redis-a:6379",
+          "redis-b:6379"
+        ],
+        "ttl": {
+          "default": 300,
+          "sessions": 86400
+        }
+      }
+    },
+    "featureFlags": {
+      "newInspector": {
+        "enabled": true,
+        "rollout": 0.42,
+        "segments": [
+          "internal",
+          "beta"
+        ]
+      },
+      "legacyExport": {
+        "enabled": false,
+        "sunsetDate": "2026-12-31",
+        "replacedBy": null
+      }
+    }
+  },
+  "users": [
+    {
+      "id": 1,
+      "uuid": "u-3e9-crhw",
+      "name": {
+        "first": "李雷",
+        "last": "Hopper"
+      },
+      "active": true,
+      "score": 39.25,
+      "balance": -612.48,
+      "roles": [
+        "user"
+      ],
+      "tags": [
+        "experimental",
+        "experimental",
+        "deprecated"
+      ],
+      "addresses": [
+        {
+          "street": "1384 König St.",
+          "city": "Reykjavík",
+          "geo": {
+            "lat": -15.437143,
+            "lng": -106.156898
+          },
+          "metadata": null
+        },
+        {
+          "street": "1330 König St.",
+          "city": "Reykjavík",
+          "geo": {
+            "lat": 26.552582,
+            "lng": -127.62886
+          },
+          "metadata": {
+            "verified": false,
+            "source": null
+          }
+        }
+      ],
+      "preferences": {
+        "theme": "high-contrast",
+        "notifications": {
+          "email": true,
+          "sms": true,
+          "push": {
+            "enabled": false,
+            "quietHours": [
+              22,
+              7
+            ]
+          }
+        },
+        "experimental": {
+          "flags": {
+            "betaUi": true,
+            "fastJson": true
+          }
+        }
+      },
+      "lastSeen": "2020-04-21T11:41:23.129Z",
+      "history": [
+        {
+          "event": "purchase",
+          "ts": 1577836800,
+          "payload": {}
+        },
+        {
+          "event": "error",
+          "ts": 1577840400,
+          "payload": {}
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "uuid": "u-3ea-c3lw",
+      "name": {
+        "first": "Alan",
+        "last": "韩"
+      },
+      "active": true,
+      "score": 13.97,
+      "balance": -3861.14,
+      "roles": [
+        "user",
+        "admin"
+      ],
+      "tags": [
+        "internal",
+        "internal"
+      ],
+      "addresses": [
+        {
+          "street": "6115 Oak St.",
+          "city": "Reykjavík",
+          "geo": {
+            "lat": 42.156258,
+            "lng": -67.629089
+          },
+          "metadata": {
+            "verified": false,
+            "source": "gps"
+          }
+        },
+        {
+          "street": "4309 Oak St.",
+          "city": "Berlin",
+          "geo": {
+            "lat": 76.917391,
+            "lng": -86.094146
+          },
+          "metadata": {
+            "verified": true,
+            "source": "manual"
+          }
+        }
+      ],
+      "preferences": {
+        "theme": "high-contrast",
+        "notifications": {
+          "email": false,
+          "sms": true,
+          "push": {
+            "enabled": true,
+            "quietHours": [
+              22,
+              7
+            ]
+          }
+        },
+        "experimental": {}
+      },
+      "lastSeen": "2021-10-31T00:54:30.632Z",
+      "history": [
+        {
+          "event": "login",
+          "ts": 1577836800,
+          "payload": {}
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "uuid": "u-3eb-km77",
+      "name": {
+        "first": "Zoë",
+        "last": "Hamilton"
+      },
+      "active": true,
+      "score": 95.2,
+      "balance": -2978.47,
+      "roles": [
+        "user"
+      ],
+      "tags": [
+        "beta",
+        "experimental"
+      ],
+      "addresses": [
+        {
+          "street": "2386 Oak St.",
+          "city": "Montréal",
+          "geo": {
+            "lat": -28.491325,
+            "lng": -50.677185
+          },
+          "metadata": null
+        },
+        {
+          "street": "3691 Oak St.",
+          "city": "Montréal",
+          "geo": {
+            "lat": 30.562248,
+            "lng": 46.517487
+          },
+          "metadata": null
+        }
+      ],
+      "preferences": {
+        "theme": "dark",
+        "notifications": {
+          "email": false,
+          "sms": true,
+          "push": {
+            "enabled": true,
+            "quietHours": [
+              22,
+              7
+            ]
+          }
+        },
+        "experimental": {
+          "flags": {
+            "betaUi": true,
+            "fastJson": true
+          }
+        }
+      },
+      "lastSeen": "2020-09-09T20:07:13.450Z",
+      "history": []
+    },
+    {
+      "id": 4,
+      "uuid": "u-3ec-awft",
+      "name": {
+        "first": "Grace",
+        "last": "Torvalds"
+      },
+      "active": false,
+      "score": 66.15,
+      "balance": 2051.66,
+      "roles": [
+        "user",
+        "owner"
+      ],
+      "tags": [],
+      "addresses": [
+        {
+          "street": "8645 Oak St.",
+          "city": "Reykjavík",
+          "geo": {
+            "lat": -33.495834,
+            "lng": -127.336307
+          },
+          "metadata": null
+        },
+        {
+          "street": "3876 König St.",
+          "city": "Nairobi",
+          "geo": {
+            "lat": -21.019163,
+            "lng": 174.025669
+          },
+          "metadata": null
+        }
+      ],
+      "preferences": {
+        "theme": "dark",
+        "notifications": {
+          "email": false,
+          "sms": true,
+          "push": {
+            "enabled": true,
+            "quietHours": [
+              22,
+              7
+            ]
+          }
+        },
+        "experimental": {}
+      },
+      "lastSeen": "2022-01-30T11:22:45.622Z",
+      "history": []
+    },
+    {
+      "id": 5,
+      "uuid": "u-3ed-44ke",
+      "name": {
+        "first": "Margaret",
+        "last": "Torvalds"
+      },
+      "active": true,
+      "score": 33.7,
+      "balance": -2158.11,
+      "roles": [
+        "user"
+      ],
+      "tags": [
+        "internal",
+        "🚀"
+      ],
+      "addresses": [
+        {
+          "street": "7352 桜 St.",
+          "city": "Reykjavík",
+          "geo": {
+            "lat": 66.616502,
+            "lng": 107.765665
+          },
+          "metadata": null
+        }
+      ],
+      "preferences": {
+        "theme": "light",
+        "notifications": {
+          "email": true,
+          "sms": false,
+          "push": {
+            "enabled": true,
+            "quietHours": [
+              22,
+              7
+            ]
+          }
+        },
+        "experimental": {}
+      },
+      "lastSeen": null,
+      "history": [
+        {
+          "event": "login",
+          "ts": 1577836800,
+          "payload": {}
+        },
+        {
+          "event": "logout",
+          "ts": 1577840400,
+          "payload": {
+            "amount": 465.08,
+            "currency": "JPY"
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "uuid": "u-3ee-2qcf",
+      "name": {
+        "first": "Ada",
+        "last": "Lovelace"
+      },
+      "active": true,
+      "score": 47.03,
+      "balance": 2980.98,
+      "roles": [
+        "user"
+      ],
+      "tags": [
+        "beta",
+        "stable",
+        "🚀"
+      ],
+      "addresses": [
+        {
+          "street": "5484 Oak St.",
+          "city": "Reykjavík",
+          "geo": {
+            "lat": -25.476952,
+            "lng": 28.487549
+          },
+          "metadata": null
+        }
+      ],
+      "preferences": {
+        "theme": "high-contrast",
+        "notifications": {
+          "email": true,
+          "sms": true,
+          "push": {
+            "enabled": true,
+            "quietHours": [
+              22,
+              7
+            ]
+          }
+        },
+        "experimental": {
+          "flags": {
+            "betaUi": true,
+            "fastJson": false
+          }
+        }
+      },
+      "lastSeen": "2020-08-12T07:00:29.011Z",
+      "history": [
+        {
+          "event": "login",
+          "ts": 1577836800,
+          "payload": {}
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "uuid": "u-3ef-xk3",
+      "name": {
+        "first": "Ada",
+        "last": "Lovelace"
+      },
+      "active": true,
+      "score": 96.75,
+      "balance": 3378.79,
+      "roles": [
+        "user"
+      ],
+      "tags": [
+        "beta",
+        "internal"
+      ],
+      "addresses": [
+        {
+          "street": "3643 Maple St.",
+          "city": "東京",
+          "geo": {
+            "lat": 21.935813,
+            "lng": -103.720593
+          },
+          "metadata": null
+        },
+        {
+          "street": "1772 Oak St.",
+          "city": "São Paulo",
+          "geo": {
+            "lat": 2.754221,
+            "lng": -39.509411
+          },
+          "metadata": null
+        }
+      ],
+      "preferences": {
+        "theme": "high-contrast",
+        "notifications": {
+          "email": false,
+          "sms": false,
+          "push": {
+            "enabled": false,
+            "quietHours": [
+              22,
+              7
+            ]
+          }
+        },
+        "experimental": {}
+      },
+      "lastSeen": "2022-03-31T22:54:29.069Z",
+      "history": []
+    },
+    {
+      "id": 8,
+      "uuid": "u-3f0-147n",
+      "name": {
+        "first": "李雷",
+        "last": "Hopper"
+      },
+      "active": true,
+      "score": 86.77,
+      "balance": 52.14,
+      "roles": [
+        "user",
+        "owner"
+      ],
+      "tags": [],
+      "addresses": [
+        {
+          "street": "196 Maple St.",
+          "city": "Nairobi",
+          "geo": {
+            "lat": -11.866693,
+            "lng": 77.291393
+          },
+          "metadata": {
+            "verified": true,
+            "source": "gps"
+          }
+        },
+        {
+          "street": "7264 König St.",
+          "city": "東京",
+          "geo": {
+            "lat": -24.237299,
+            "lng": 147.999401
+          },
+          "metadata": null
+        }
+      ],
+      "preferences": {
+        "theme": "light",
+        "notifications": {
+          "email": true,
+          "sms": false,
+          "push": {
+            "enabled": false,
+            "quietHours": [
+              22,
+              7
+            ]
+          }
+        },
+        "experimental": {}
+      },
+      "lastSeen": "2020-06-28T03:22:08.850Z",
+      "history": [
+        {
+          "event": "error",
+          "ts": 1577836800,
+          "payload": {}
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "uuid": "u-3f1-kxha",
+      "name": {
+        "first": "Alan",
+        "last": "韩"
+      },
+      "active": true,
+      "score": 78.37,
+      "balance": -3061.5,
+      "roles": [
+        "user",
+        "admin"
+      ],
+      "tags": [],
+      "addresses": [
+        {
+          "street": "1059 König St.",
+          "city": "São Paulo",
+          "geo": {
+            "lat": -25.565164,
+            "lng": 13.278222
+          },
+          "metadata": {
+            "verified": true,
+            "source": null
+          }
+        }
+      ],
+      "preferences": {
+        "theme": "dark",
+        "notifications": {
+          "email": false,
+          "sms": false,
+          "push": {
+            "enabled": true,
+            "quietHours": [
+              22,
+              7
+            ]
+          }
+        },
+        "experimental": {}
+      },
+      "lastSeen": "2021-03-12T15:05:45.291Z",
+      "history": []
+    },
+    {
+      "id": 10,
+      "uuid": "u-3f2-2znw",
+      "name": {
+        "first": "Søren",
+        "last": "韩"
+      },
+      "active": false,
+      "score": 71.28,
+      "balance": -1349.48,
+      "roles": [
+        "user"
+      ],
+      "tags": [
+        "🚀"
+      ],
+      "addresses": [
+        {
+          "street": "4370 Oak St.",
+          "city": "Montréal",
+          "geo": {
+            "lat": 43.133783,
+            "lng": 101.438313
+          },
+          "metadata": null
+        }
+      ],
+      "preferences": {
+        "theme": "light",
+        "notifications": {
+          "email": false,
+          "sms": false,
+          "push": {
+            "enabled": false,
+            "quietHours": [
+              22,
+              7
+            ]
+          }
+        },
+        "experimental": {}
+      },
+      "lastSeen": "2021-04-02T14:50:28.530Z",
+      "history": []
+    },
+    {
+      "id": 11,
+      "uuid": "u-3f3-3yhk",
+      "name": {
+        "first": "山田",
+        "last": "太郎"
+      },
+      "active": false,
+      "score": 60.59,
+      "balance": -2046.26,
+      "roles": [
+        "user"
+      ],
+      "tags": [
+        "deprecated",
+        "priority"
+      ],
+      "addresses": [
+        {
+          "street": "939 Oak St.",
+          "city": "Reykjavík",
+          "geo": {
+            "lat": 25.944171,
+            "lng": -111.50754
+          },
+          "metadata": {
+            "verified": true,
+            "source": null
+          }
+        },
+        {
+          "street": "3162 König St.",
+          "city": "Nairobi",
+          "geo": {
+            "lat": -37.522838,
+            "lng": 127.335363
+          },
+          "metadata": {
+            "verified": false,
+            "source": "gps"
+          }
+        }
+      ],
+      "preferences": {
+        "theme": "high-contrast",
+        "notifications": {
+          "email": false,
+          "sms": false,
+          "push": {
+            "enabled": true,
+            "quietHours": [
+              22,
+              7
+            ]
+          }
+        },
+        "experimental": {}
+      },
+      "lastSeen": "2020-02-02T09:14:16.603Z",
+      "history": []
+    },
+    {
+      "id": 12,
+      "uuid": "u-3f4-byzw",
+      "name": {
+        "first": "Ada",
+        "last": "Hopper"
+      },
+      "active": false,
+      "score": 42.92,
+      "balance": 605.08,
+      "roles": [
+        "user"
+      ],
+      "tags": [],
+      "addresses": [
+        {
+          "street": "9255 Maple St.",
+          "city": "Reykjavík",
+          "geo": {
+            "lat": -89.73753,
+            "lng": 54.232302
+          },
+          "metadata": null
+        },
+        {
+          "street": "3130 桜 St.",
+          "city": "東京",
+          "geo": {
+            "lat": 21.111565,
+            "lng": -160.738864
+          },
+          "metadata": {
+            "verified": false,
+            "source": "gps"
+          }
+        }
+      ],
+      "preferences": {
+        "theme": "dark",
+        "notifications": {
+          "email": false,
+          "sms": false,
+          "push": {
+            "enabled": false,
+            "quietHours": [
+              22,
+              7
+            ]
+          }
+        },
+        "experimental": {}
+      },
+      "lastSeen": "2022-04-02T04:57:55.341Z",
+      "history": [
+        {
+          "event": "login",
+          "ts": 1577836800,
+          "payload": {
+            "amount": 494,
+            "currency": "EUR"
+          }
+        },
+        {
+          "event": "error",
+          "ts": 1577840400,
+          "payload": {
+            "amount": 51.27,
+            "currency": "USD"
+          }
+        }
+      ]
+    }
+  ],
+  "matrix": [
+    [
+      1,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      1,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      1,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      1
+    ]
+  ],
+  "mixedArray": [
+    1,
+    "two",
+    false,
+    null,
+    {
+      "kind": "object-in-array",
+      "nested": [
+        {
+          "a": [
+            1,
+            [
+              2,
+              [
+                3,
+                [
+                  4
+                ]
+              ]
+            ]
+          ]
+        }
+      ]
+    },
+    [
+      9,
+      8,
+      7
+    ],
+    3.14
+  ],
+  "deeplyNested": {
+    "level": 15,
+    "note": "nested level 15",
+    "child": {
+      "level": 14,
+      "note": "nested level 14",
+      "child": {
+        "level": 13,
+        "note": "nested level 13",
+        "child": {
+          "level": 12,
+          "note": "nested level 12",
+          "child": {
+            "level": 11,
+            "note": "nested level 11",
+            "child": {
+              "level": 10,
+              "note": "nested level 10",
+              "child": {
+                "level": 9,
+                "note": "nested level 9",
+                "child": {
+                  "level": 8,
+                  "note": "nested level 8",
+                  "child": {
+                    "level": 7,
+                    "note": "nested level 7",
+                    "child": {
+                      "level": 6,
+                      "note": "nested level 6",
+                      "child": {
+                        "level": 5,
+                        "note": "nested level 5",
+                        "child": {
+                          "level": 4,
+                          "note": "nested level 4",
+                          "child": {
+                            "level": 3,
+                            "note": "nested level 3",
+                            "child": {
+                              "level": 2,
+                              "note": "nested level 2",
+                              "child": {
+                                "level": 1,
+                                "note": "nested level 1",
+                                "child": {
+                                  "leaf": true,
+                                  "value": "bottom 🪨",
+                                  "depth": 0
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "analytics": {
+    "daily": [
+      {
+        "date": "2026-06-01",
+        "visits": 2747,
+        "conversion": 0.3177,
+        "byCountry": {
+          "US": 4698,
+          "DE": 964,
+          "JP": 1273
+        }
+      },
+      {
+        "date": "2026-06-02",
+        "visits": 6823,
+        "conversion": 0.3939,
+        "byCountry": {
+          "US": 2198,
+          "DE": 1346,
+          "JP": 36
+        }
+      },
+      {
+        "date": "2026-06-03",
+        "visits": 559,
+        "conversion": 0.1244,
+        "byCountry": {
+          "US": 766,
+          "DE": 37,
+          "JP": 832
+        }
+      },
+      {
+        "date": "2026-06-04",
+        "visits": 5583,
+        "conversion": 0.0817,
+        "byCountry": {
+          "US": 506,
+          "DE": 747,
+          "JP": 1913
+        }
+      },
+      {
+        "date": "2026-06-05",
+        "visits": 323,
+        "conversion": 0.1494,
+        "byCountry": {
+          "US": 669,
+          "DE": 1554,
+          "JP": 258
+        }
+      },
+      {
+        "date": "2026-06-06",
+        "visits": 1777,
+        "conversion": 0.755,
+        "byCountry": {
+          "US": 3706,
+          "DE": 1133,
+          "JP": 1082
+        }
+      },
+      {
+        "date": "2026-06-07",
+        "visits": 2459,
+        "conversion": 0.8778,
+        "byCountry": {
+          "US": 4595,
+          "DE": 1023,
+          "JP": 1184
+        }
+      }
+    ],
+    "funnels": {
+      "signup": {
+        "steps": [
+          "land",
+          "form",
+          "verify",
+          "done"
+        ],
+        "dropOff": [
+          0,
+          0.31,
+          0.55,
+          0.7
+        ]
+      }
+    }
+  }
+}
