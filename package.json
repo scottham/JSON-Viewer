@@ -65,10 +65,15 @@
     "configuration": {
       "title": "JSON Viewer",
       "properties": {
-        "jsonViewer.autoExpandDepth": {
+        "jsonViewer.expandLevel": {
           "type": "number",
-          "default": 2,
-          "description": "Levels of the tree to auto-expand when the viewer opens."
+          "default": 1,
+          "description": "JSON files: expand the tree to this level when opened (root = level 0). 0 shows top-level entries collapsed; 1 expands them one level."
+        },
+        "jsonViewer.expandLevelJsonl": {
+          "type": "number",
+          "default": 0,
+          "description": "JSONL/NDJSON files: expand the tree to this level when opened (root = level 0). 0 lists the records collapsed."
         },
         "jsonViewer.liveUpdate": {
           "type": "boolean",

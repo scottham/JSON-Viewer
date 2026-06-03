@@ -34,7 +34,9 @@ source; the text editor stays exactly as it was.
   a **list of dicts** (like PyCharm's dict-list view). A malformed line is
   reported and skipped instead of blanking the whole panel.
 - **Expand / collapse** each node; child counts shown on branches (`{12}`, `[4]`).
-- **Auto-expand** the first N levels (configurable).
+- **Auto-expand** on open, with a default that fits the format: JSON expands to
+  level 1 (top-level entries open); JSONL opens at level 0 (records listed but
+  collapsed). Both configurable.
 - **Filter** by key or value; matching rows highlight and their ancestors
   auto-expand.
 - **Right-click menu** on any row:
@@ -64,7 +66,8 @@ The viewer opens in a panel beside the source.
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `jsonViewer.autoExpandDepth` | `2` | Levels to auto-expand on open. |
+| `jsonViewer.expandLevel` | `1` | JSON: expand to this level on open (root = 0). |
+| `jsonViewer.expandLevelJsonl` | `0` | JSONL/NDJSON: expand to this level on open (root = 0). |
 | `jsonViewer.liveUpdate` | `true` | Re-parse as the document changes. |
 
 ## Sample data

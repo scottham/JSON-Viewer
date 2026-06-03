@@ -119,10 +119,15 @@ function openViewer(context, document) {
   panels.set(key, panel);
 
   const config = vscode.workspace.getConfiguration("jsonViewer");
-  const autoExpandDepth = config.get("autoExpandDepth", 2);
+  // Default expand level differs by file type: JSON opens with top-level
+  // entries expanded (level 1); JSONL opens with the record list shown but each
+  // record collapsed (level 0). Root is level 0.
+  const expandLevel = isLineDelimited(document)
+    ? config.get("expandLevelJsonl", 0)
+    : config.get("expandLevel", 1);
   const liveUpdate = config.get("liveUpdate", true);
 
-  panel.webview.html = getHtml(panel.webview, autoExpandDepth);
+  panel.webview.html = getHtml(panel.webview, expandLevel);
 
   // path string -> { key, val, end } source offsets, refreshed on every post so
   // double-click / "jump" can map an inspector row back to the source text.
@@ -362,7 +367,7 @@ function fillOffsets(node, path, base, map) {
   }
 }
 
-function getHtml(webview, autoExpandDepth) {
+function getHtml(webview, expandLevel) {
   const nonce = String(Date.now()) + Math.random().toString(36).slice(2);
   const csp = [
     `default-src 'none'`,
@@ -389,7 +394,7 @@ function getHtml(webview, autoExpandDepth) {
   <div id="status" class="muted"></div>
   <div id="tree"></div>
   <script nonce="${nonce}">
-    const AUTO_EXPAND_DEPTH = ${Number(autoExpandDepth) || 0};
+    const AUTO_EXPAND_LEVEL = ${Number(expandLevel) || 0};
     ${CLIENT_JS}
   </script>
 </body>
@@ -554,7 +559,7 @@ function wrap(n, key, path, depth) {
     value: n.v, // leaves: decoded primitive (string/bool/null) or parsed number
     depth,
     children: null,
-    expanded: depth < AUTO_EXPAND_DEPTH,
+    expanded: depth <= AUTO_EXPAND_LEVEL,
   };
   if (n.t === "object") {
     node.children = n.c.map((ch) =>
