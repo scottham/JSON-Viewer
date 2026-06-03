@@ -663,10 +663,10 @@ function showMenu(x, y, node) {
   menuEl = document.createElement("div");
   menuEl.className = "ctxmenu";
   const items = [
-    ["复制结构 (copy structure)", "", function () { copyStructure(node); }],
-    ["复制值 (copy value)", "", function () { copyNodeValue(node); }],
-    ["复制路径 (copy path)", "", function () { vscode.postMessage({ type: "copy", value: node.path, label: "path" }); }],
-    ["跳转到源码 (jump)", "", function () { jumpTo(node, "value"); }],
+    ["Copy structure", "", function () { copyStructure(node); }],
+    ["Copy value", "", function () { copyNodeValue(node); }],
+    ["Copy path", "", function () { vscode.postMessage({ type: "copy", value: node.path, label: "path" }); }],
+    ["Jump to source", "", function () { jumpTo(node, "value"); }],
   ];
   for (const it of items) {
     const el = document.createElement("div");

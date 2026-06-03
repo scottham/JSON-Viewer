@@ -38,12 +38,13 @@ source; the text editor stays exactly as it was.
 - **Filter** by key or value; matching rows highlight and their ancestors
   auto-expand.
 - **Right-click menu** on any row:
-  - **复制结构 / copy structure** — the shape as a type skeleton (leaf values
-    replaced by `int`/`str`/…, arrays collapsed to one sample element).
-  - **复制值 / copy value** — the raw value (full pretty JSON for containers).
-  - **复制路径 / copy path** — e.g. `$.users[3].preferences.theme`.
-  - **跳转 / jump** — select and scroll the source editor to that exact element
-    (works for JSON and per-record in JSONL).
+  - **Copy structure** — the shape as a type skeleton (leaf values replaced by
+    `int`/`str`/…, arrays collapsed to one sample element).
+  - **Copy value** — the exact source text of the value (a whole object/array
+    yields its exact source substring).
+  - **Copy path** — e.g. `$.users[3].preferences.theme`.
+  - **Jump to source** — select and scroll the source editor to that exact
+    element (works for JSON and per-record in JSONL).
 - **Live update**: edit the JSON in the editor and the viewer re-parses.
 - **Invalid JSON** shows the parser error instead of a blank panel.
 - Honors your VSCode theme colors (works in light, dark, high-contrast).
