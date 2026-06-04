@@ -90,10 +90,30 @@ The viewer opens in a panel beside the source.
 
 ## Packaging
 
+Package the extension locally with the official VSCode extension CLI:
+
 ```bash
-npm i -g @vscode/vsce
-vsce package        # produces json-viewer-0.1.0.vsix
+npx @vscode/vsce package
+# produces json-viewer-0.1.0.vsix
 ```
+
+## GitHub Actions packaging automation
+
+This repository includes `.github/workflows/package-vsix.yml` to automate VSIX
+creation without publishing it to any marketplace.
+
+- Pull requests and pushes to `main` run `npx @vscode/vsce package` and upload
+  the generated `.vsix` as a workflow artifact.
+- Publishing a GitHub Release also packages the extension and stores the VSIX as
+  a workflow artifact, so you can download and publish or distribute it
+  manually.
+- You can also start the workflow manually from the GitHub Actions tab when you
+  need an on-demand VSIX build.
+
+The generated `.vsix` is the same package format used for local VSCode
+installation and for manual upload to marketplaces such as the Microsoft VS Code
+Marketplace or Open VSX. This workflow intentionally does not publish to either
+marketplace and does not require marketplace tokens or repository secrets.
 
 ## Compatibility: VSCode, Cursor, Antigravity
 
