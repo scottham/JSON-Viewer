@@ -24,7 +24,7 @@ function activate(context) {
 
       if (!document) {
         vscode.window.showErrorMessage(
-          "Json Viewer: Inspector Tree: open a JSON file first, then run the command."
+          "JSON Viewer: Tree Inspector: open a JSON file first, then run the command."
         );
         return;
       }
@@ -125,7 +125,7 @@ function openViewer(context, document) {
 
   const panel = vscode.window.createWebviewPanel(
     "jsonViewer",
-    `Json Viewer: Inspector Tree: ${path.basename(document.fileName)}`,
+    `JSON Viewer: Tree Inspector: ${path.basename(document.fileName)}`,
     vscode.ViewColumn.Beside,
     { enableScripts: true, retainContextWhenHidden: true }
   );
@@ -185,7 +185,7 @@ function openViewer(context, document) {
       } else if (msg.type === "copy") {
         vscode.env.clipboard.writeText(msg.value);
         vscode.window.setStatusBarMessage(
-          `Json Viewer: Inspector Tree: copied ${msg.label}`,
+          `JSON Viewer: Tree Inspector: copied ${msg.label}`,
           2000
         );
       } else if (msg.type === "copyRaw" && typeof msg.path === "string") {
@@ -195,7 +195,7 @@ function openViewer(context, document) {
         if (entry) {
           vscode.env.clipboard.writeText(parsedText.slice(entry.val, entry.end));
           vscode.window.setStatusBarMessage(
-            "Json Viewer: Inspector Tree: copied value",
+            "JSON Viewer: Tree Inspector: copied value",
             2000
           );
         }
