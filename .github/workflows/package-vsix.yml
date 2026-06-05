@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   package:
@@ -35,6 +35,9 @@ jobs:
           console.log(`vsix=${manifest.name}-${manifest.version}.vsix`);
           NODE
 
+      - name: Run tests
+        run: npm test
+
       - name: Package extension with vsce
         run: npx --yes @vscode/vsce package --out "${{ steps.meta.outputs.vsix }}"
 
@@ -44,3 +47,9 @@ jobs:
           name: vscode-extension-vsix
           path: ${{ steps.meta.outputs.vsix }}
           if-no-files-found: error
+
+      - name: Attach VSIX to GitHub Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "${{ steps.meta.outputs.vsix }}" --clobber
