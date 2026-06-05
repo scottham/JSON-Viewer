@@ -5,9 +5,6 @@ on:
   push:
     branches:
       - main
-  release:
-    types:
-      - published
   workflow_dispatch:
 
 permissions:
@@ -33,6 +30,7 @@ jobs:
           node - <<'NODE' >> "$GITHUB_OUTPUT"
           const manifest = require('./package.json');
           console.log(`vsix=${manifest.name}-${manifest.version}.vsix`);
+          console.log(`tag=v${manifest.version}`);
           NODE
 
       - name: Run tests
@@ -48,8 +46,21 @@ jobs:
           path: ${{ steps.meta.outputs.vsix }}
           if-no-files-found: error
 
-      - name: Attach VSIX to GitHub Release
-        if: github.event_name == 'release'
+      - name: Create GitHub Release
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" "${{ steps.meta.outputs.vsix }}" --clobber
+        run: |
+          tag="${{ steps.meta.outputs.tag }}"
+          vsix="${{ steps.meta.outputs.vsix }}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; skipping release creation."
+            exit 0
+          fi
+
+          gh release create "$tag" "$vsix" \
+            --target "$GITHUB_SHA" \
+            --title "$tag" \
+            --notes "Packaged VSIX for $tag." \
+            --latest
