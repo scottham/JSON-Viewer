@@ -2,8 +2,9 @@
   "name": "json-viewer-inspector-tree",
   "displayName": "Json Viewer: Inspector Tree",
   "description": "View JSON/dict files as an interactive, expandable IDE debugger-style variable-inspector tree.",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "prokids",
+  "icon": "media/icon.png",
   "license": "MIT",
   "scripts": {
     "test": "node test-parser.js"
