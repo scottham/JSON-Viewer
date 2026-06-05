@@ -1,5 +1,9 @@
 .vscode/**
 .git/**
 generate-sample.js
+test-parser.js
+scripts/**
+*.mp4
+media/*.gif
 **/*.map
 .gitignore

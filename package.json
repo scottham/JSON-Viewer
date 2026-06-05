@@ -5,6 +5,9 @@
   "version": "0.1.0",
   "publisher": "prokids",
   "license": "MIT",
+  "scripts": {
+    "test": "node test-parser.js"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/scottham/JSON-Viewer.git"
@@ -67,7 +70,7 @@
       "properties": {
         "jsonViewer.expandLevel": {
           "type": "number",
-          "default": 1,
+          "default": 0,
           "description": "JSON files: expand the tree to this level when opened (root = level 0). 0 shows top-level entries collapsed; 1 expands them one level."
         },
         "jsonViewer.expandLevelJsonl": {

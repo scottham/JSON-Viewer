@@ -41,37 +41,46 @@ function activate(context) {
 // "list of dicts" just like PyCharm's dict-list view. A single malformed line
 // is reported but does not blank out the rest.
 function isLineDelimited(document) {
-  const ext = path.extname(document.fileName).toLowerCase();
+  return isLineDelimitedFile(document.fileName);
+}
+
+function isLineDelimitedFile(fileName) {
+  const ext = path.extname(fileName).toLowerCase();
   return ext === ".jsonl" || ext === ".ndjson";
 }
 
-function parseDocument(document) {
-  const text = document.getText();
+function isJsoncFile(fileName) {
+  return path.extname(fileName).toLowerCase() === ".jsonc";
+}
+
+function parseDocumentText(fileName, text) {
   const offsets = new Map();
 
-  if (isLineDelimited(document)) {
+  if (isLineDelimitedFile(fileName)) {
     const errors = [];
-    const lineStarts = [0];
-    for (let k = 0; k < text.length; k++) {
-      if (text[k] === "\n") lineStarts.push(k + 1);
-    }
     const children = [];
     let rec = 0;
-    for (let li = 0; li < lineStarts.length; li++) {
-      const start = lineStarts[li];
-      const end = li + 1 < lineStarts.length ? lineStarts[li + 1] : text.length;
+    let lineNo = 1;
+    let start = 0;
+
+    while (start < text.length) {
+      const nl = text.indexOf("\n", start);
+      const end = nl === -1 ? text.length : nl + 1;
       const line = text.slice(start, end);
-      if (line.trim() === "") continue;
-      try {
-        JSON.parse(line); // validity gate; tree/values come from parseToTree
-      } catch (e) {
-        errors.push({ line: li + 1, message: e.message });
-        continue;
+      if (line.trim() !== "") {
+        try {
+          JSON.parse(line); // validity gate; tree/values come from parseToTree
+          const node = parseToTree(line);
+          children.push(projectNode(node, "$[" + rec + "]", start, offsets));
+          rec++;
+        } catch (e) {
+          errors.push({ line: lineNo, message: e.message });
+        }
       }
-      const node = parseToTree(line);
-      fillOffsets(node, "$[" + rec + "]", start, offsets);
-      children.push(leanNode(node));
-      rec++;
+
+      if (nl === -1) break;
+      start = end;
+      lineNo++;
     }
     if (children.length === 0) {
       return {
@@ -91,14 +100,19 @@ function parseDocument(document) {
     };
   }
 
+  const jsonc = isJsoncFile(fileName);
   try {
-    JSON.parse(text); // validity gate
+    JSON.parse(jsonc ? jsoncToJson(text) : text); // validity gate
   } catch (e) {
     return { ok: false, error: e.message };
   }
-  const root = parseToTree(text);
-  fillOffsets(root, "$", 0, offsets);
-  return { ok: true, tree: leanNode(root), jsonl: false, offsets };
+  const root = parseToTree(text, { jsonc });
+  return {
+    ok: true,
+    tree: projectNode(root, "$", 0, offsets),
+    jsonl: false,
+    offsets,
+  };
 }
 
 function openViewer(context, document) {
@@ -120,11 +134,11 @@ function openViewer(context, document) {
 
   const config = vscode.workspace.getConfiguration("jsonViewer");
   // Default expand level differs by file type: JSON opens with top-level
-  // entries expanded (level 1); JSONL opens with the record list shown but each
+  // entries collapsed (level 0); JSONL opens with the record list shown but each
   // record collapsed (level 0). Root is level 0.
   const expandLevel = isLineDelimited(document)
     ? config.get("expandLevelJsonl", 0)
-    : config.get("expandLevel", 1);
+    : config.get("expandLevel", 0);
   const liveUpdate = config.get("liveUpdate", true);
 
   panel.webview.html = getHtml(panel.webview, expandLevel);
@@ -132,9 +146,17 @@ function openViewer(context, document) {
   // path string -> { key, val, end } source offsets, refreshed on every post so
   // double-click / "jump" can map an inspector row back to the source text.
   let offsetMap = new Map();
+  let parsedText = "";
+  let parseTimer;
 
   const post = () => {
-    const parsed = parseDocument(document);
+    if (parseTimer) {
+      clearTimeout(parseTimer);
+      parseTimer = undefined;
+    }
+    const text = document.getText();
+    const parsed = parseDocumentText(document.fileName, text);
+    parsedText = parsed.ok ? text : "";
     offsetMap = parsed.ok ? parsed.offsets : new Map();
     panel.webview.postMessage({
       type: "load",
@@ -145,6 +167,14 @@ function openViewer(context, document) {
       errors: parsed.errors,
       error: parsed.error,
     });
+  };
+
+  const schedulePost = () => {
+    if (parseTimer) clearTimeout(parseTimer);
+    parseTimer = setTimeout(() => {
+      parseTimer = undefined;
+      post();
+    }, 120);
   };
 
   // Push the first payload once the webview signals it is ready.
@@ -159,15 +189,15 @@ function openViewer(context, document) {
           2000
         );
       } else if (msg.type === "copyRaw" && typeof msg.path === "string") {
-        // Branch "copy value": slice the exact source substring from the file.
+        // Copy value: slice the exact source substring from the latest parse.
+        if (document.getText() !== parsedText) post();
         const entry = offsetMap.get(msg.path);
         if (entry) {
-          vscode.env.clipboard.writeText(
-            document.getText().slice(entry.val, entry.end)
-          );
+          vscode.env.clipboard.writeText(parsedText.slice(entry.val, entry.end));
           vscode.window.setStatusBarMessage("JSON Viewer: copied value", 2000);
         }
       } else if (msg.type === "reveal" && typeof msg.path === "string") {
+        if (document.getText() !== parsedText) post();
         const entry = offsetMap.get(msg.path);
         if (entry) {
           if (msg.which === "key") {
@@ -186,7 +216,7 @@ function openViewer(context, document) {
   if (liveUpdate) {
     changeSub = vscode.workspace.onDidChangeTextDocument((e) => {
       if (e.document.uri.toString() === key) {
-        post();
+        schedulePost();
       }
     });
     context.subscriptions.push(changeSub);
@@ -195,6 +225,7 @@ function openViewer(context, document) {
   panel.onDidDispose(
     () => {
       panels.delete(key);
+      if (parseTimer) clearTimeout(parseTimer);
       if (changeSub) changeSub.dispose();
     },
     null,
@@ -227,20 +258,124 @@ function escapeKeyExt(k) {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k) ? k : JSON.stringify(k);
 }
 
+// Convert JSONC to strict JSON for the JSON.parse validity gate. Comments are
+// replaced with spaces/newlines so parse errors stay roughly aligned; trailing
+// commas are skipped only when the next significant token closes the branch.
+function jsoncToJson(text) {
+  let i = 0;
+  const n = text.length;
+  let lastSig = "";
+  let parts = null;
+  let lastEmit = 0;
+
+  const skipJsoncSpace = (j) => {
+    while (j < n) {
+      const c = text.charCodeAt(j);
+      if (c === 32 || c === 9 || c === 10 || c === 13) { j++; continue; }
+      if (text[j] === "/" && text[j + 1] === "/") {
+        j += 2;
+        while (j < n && text[j] !== "\n" && text[j] !== "\r") j++;
+        continue;
+      }
+      if (text[j] === "/" && text[j + 1] === "*") {
+        j += 2;
+        while (j < n && !(text[j] === "*" && text[j + 1] === "/")) j++;
+        if (j >= n) throw new Error("Unterminated block comment in JSONC");
+        j += 2;
+        continue;
+      }
+      break;
+    }
+    return j;
+  };
+
+  const replaceRange = (start, end) => {
+    if (!parts) parts = [];
+    parts.push(text.slice(lastEmit, start));
+    parts.push(text.slice(start, end).replace(/[^\r\n]/g, " "));
+    lastEmit = end;
+  };
+
+  while (i < n) {
+    if (text[i] === '"') {
+      i++;
+      while (i < n) {
+        if (text[i] === "\\") {
+          i += 2;
+        } else if (text[i] === '"') {
+          i++;
+          break;
+        } else {
+          i++;
+        }
+      }
+      lastSig = '"';
+      continue;
+    }
+
+    if (text[i] === "/" && text[i + 1] === "/") {
+      const start = i;
+      i += 2;
+      while (i < n && text[i] !== "\n" && text[i] !== "\r") i++;
+      replaceRange(start, i);
+      continue;
+    }
+
+    if (text[i] === "/" && text[i + 1] === "*") {
+      const start = i;
+      i += 2;
+      while (i < n && !(text[i] === "*" && text[i + 1] === "/")) i++;
+      if (i >= n) throw new Error("Unterminated block comment in JSONC");
+      i += 2;
+      replaceRange(start, i);
+      continue;
+    }
+
+    if (text[i] === ",") {
+      const j = skipJsoncSpace(i + 1);
+      if (
+        (text[j] === "}" || text[j] === "]") &&
+        lastSig &&
+        !"{[,:".includes(lastSig)
+      ) {
+        replaceRange(i, i + 1);
+        i++;
+        continue;
+      }
+    }
+
+    const ch = text[i++];
+    if (!/\s/.test(ch)) lastSig = ch;
+  }
+
+  if (!parts) return text;
+  parts.push(text.slice(lastEmit));
+  return parts.join("");
+}
+
 // Parse `text` into a node tree that carries the EXACT source substring (`raw`)
 // of every value. This is the single source of truth for what the viewer shows
 // and copies — we never round-trip values through JSON.parse for display, since
 // that is lossy for numbers (precision past 2^53, -0, trailing zeros, exponent
 // form). Each node: { type, raw, value?, key?, keyStart, valStart, valEnd,
 // children? } with offsets relative to `text`.
-function parseToTree(text) {
+function parseToTree(text, options = {}) {
   let i = 0;
   const n = text.length;
+  const jsonc = !!options.jsonc;
 
   const skipWs = () => {
     while (i < n) {
       const c = text.charCodeAt(i);
       if (c === 32 || c === 9 || c === 10 || c === 13) i++;
+      else if (jsonc && text[i] === "/" && text[i + 1] === "/") {
+        i += 2;
+        while (i < n && text[i] !== "\n" && text[i] !== "\r") i++;
+      } else if (jsonc && text[i] === "/" && text[i + 1] === "*") {
+        i += 2;
+        while (i < n && !(text[i] === "*" && text[i + 1] === "/")) i++;
+        i = Math.min(n, i + 2);
+      }
       else break;
     }
   };
@@ -279,6 +414,7 @@ function parseToTree(text) {
       else {
         while (i < n) {
           skipWs();
+          if (jsonc && text[i] === "}") { i++; break; }
           const keyStart = i;
           const k = parseString();
           skipWs();
@@ -302,6 +438,7 @@ function parseToTree(text) {
       else {
         while (i < n) {
           skipWs();
+          if (jsonc && text[i] === "]") { i++; break; }
           const child = parseValue();
           child.keyStart = child.valStart;
           node.children.push(child);
@@ -326,7 +463,7 @@ function parseToTree(text) {
     }
     node.valStart = valStart;
     node.valEnd = i;
-    node.raw = text.slice(valStart, i);
+    if (!node.children) node.raw = text.slice(valStart, i);
     return node;
   };
 
@@ -336,35 +473,31 @@ function parseToTree(text) {
   return root;
 }
 
-// Reduce a parsed node to the minimal shape sent to the webview: type (t), key
-// (k), and either children (c) or a leaf's exact raw source (r) + decoded value
-// (v). Branches carry no raw — copying a whole object/array is sliced from the
-// source on demand via its offset, so payload stays ~= file size, not O(depth).
-function leanNode(node) {
-  const out = { t: node.type };
-  if (node.key !== undefined) out.k = node.key;
-  if (node.children) out.c = node.children.map(leanNode);
-  else { out.r = node.raw; out.v = node.value; }
-  return out;
-}
-
-// Walk a parsed node filling `map` with path -> {key,val,end} absolute offsets,
-// using the SAME path scheme as the webview ($ root, .member, [index]).
-function fillOffsets(node, path, base, map) {
-  map.set(path, {
+// Reduce a parsed node to the minimal shape sent to the webview while filling
+// path -> {key,val,end} offsets in the same walk. Branches carry no raw —
+// copying a whole object/array is sliced from source on demand by offset.
+function projectNode(node, nodePath, base, map) {
+  map.set(nodePath, {
     key: base + node.keyStart,
     val: base + node.valStart,
     end: base + node.valEnd,
   });
+
+  const out = { t: node.type };
+  if (node.key !== undefined) out.k = node.key;
   if (node.type === "object") {
-    for (const ch of node.children) {
-      fillOffsets(ch, path + "." + escapeKeyExt(ch.key), base, map);
-    }
-  } else if (node.type === "array") {
-    node.children.forEach((ch, idx) =>
-      fillOffsets(ch, path + "[" + idx + "]", base, map)
+    out.c = node.children.map((ch) =>
+      projectNode(ch, nodePath + "." + escapeKeyExt(ch.key), base, map)
     );
+  } else if (node.type === "array") {
+    out.c = node.children.map((ch, idx) =>
+      projectNode(ch, nodePath + "[" + idx + "]", base, map)
+    );
+  } else {
+    out.r = node.raw;
+    out.v = node.value;
   }
+  return out;
 }
 
 function getHtml(webview, expandLevel) {
@@ -642,11 +775,7 @@ function copyStructure(node) {
 // file. Leaves carry their raw text; branches are sliced from source by the
 // extension (it holds the offset map) to avoid shipping duplicated text.
 function copyNodeValue(node) {
-  if (node.raw !== undefined) {
-    vscode.postMessage({ type: "copy", value: node.raw, label: "value" });
-  } else {
-    vscode.postMessage({ type: "copyRaw", path: node.path });
-  }
+  vscode.postMessage({ type: "copyRaw", path: node.path });
 }
 
 function jumpTo(node, which) {
@@ -871,4 +1000,12 @@ vscode.postMessage({ type: "ready" });
 
 function deactivate() {}
 
-module.exports = { activate, deactivate };
+module.exports = {
+  activate,
+  deactivate,
+  _test: {
+    jsoncToJson,
+    parseDocumentText,
+    parseToTree,
+  },
+};
