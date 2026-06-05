@@ -1,8 +1,13 @@
 .vscode/**
+.github/**
 .git/**
 generate-sample.js
+generate-sample-jsonl.js
 test-parser.js
+sample-*.json
+sample-*.jsonl
 scripts/**
+*.vsix
 *.mp4
 media/*.gif
 **/*.map

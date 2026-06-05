@@ -1,7 +1,7 @@
-# JSON Viewer
+# Json Viewer
 
-Open a JSON file as a PyCharm-style inspector tree, without changing VS Code's
-normal text editor.
+Open a JSON file as an IDE debugger-style inspector tree, without changing VS
+Code's normal text editor.
 
 ## Demo
 
@@ -19,7 +19,7 @@ or jump to the exact source location.
 
 ## Features
 
-- PyCharm-style rows: `key = {type} value`.
+- IDE debugger-style rows: `key = {type} value`.
 - Objects and arrays show child counts and can be expanded or collapsed.
 - JSON opens with top-level branches collapsed by default.
 - JSONL/NDJSON opens as a list of records; malformed lines are reported without
