@@ -1,4 +1,4 @@
-# Json Viewer
+# Json Viewer: Inspector Tree
 
 Open a JSON file as an IDE debugger-style inspector tree, without changing VS
 Code's normal text editor.
@@ -8,14 +8,14 @@ Code's normal text editor.
 Open any `.json`, `.jsonc`, `.jsonl`, or `.ndjson` file, then use one of:
 
 - Click the **Open with JSON Viewer** tree icon in the editor title bar.
-- Run **JSON Viewer: Open with JSON Viewer** from the Command Palette.
+- Run **Json Viewer: Inspector Tree: Open with JSON Viewer** from the Command Palette.
 - Right-click the file in Explorer and choose **Open with JSON Viewer**.
 
 The viewer opens beside the source file. The original editor stays exactly as it
 was. Right-click any row in the tree to copy values, copy paths, copy structure,
 or jump to the exact source location.
 
-![Open JSON Viewer and jump back to source](media/json-viewer-demo.gif)
+![Open Json Viewer: Inspector Tree and jump back to source](media/json-viewer-demo.gif)
 
 ## Features
 

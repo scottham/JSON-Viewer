@@ -24,7 +24,7 @@ function activate(context) {
 
       if (!document) {
         vscode.window.showErrorMessage(
-          "JSON Viewer: open a JSON file first, then run the command."
+          "Json Viewer: Inspector Tree: open a JSON file first, then run the command."
         );
         return;
       }
@@ -38,8 +38,8 @@ function activate(context) {
 
 // JSONL / NDJSON are detected by file extension. Each non-blank line is an
 // independent JSON value; we parse them into an array so the inspector shows a
-// "list of dicts" just like PyCharm's dict-list view. A single malformed line
-// is reported but does not blank out the rest.
+// "list of dicts" in an inspector-style view. A single malformed line is
+// reported but does not blank out the rest.
 function isLineDelimited(document) {
   return isLineDelimitedFile(document.fileName);
 }
@@ -125,7 +125,7 @@ function openViewer(context, document) {
 
   const panel = vscode.window.createWebviewPanel(
     "jsonViewer",
-    `JSON Viewer: ${path.basename(document.fileName)}`,
+    `Json Viewer: Inspector Tree: ${path.basename(document.fileName)}`,
     vscode.ViewColumn.Beside,
     { enableScripts: true, retainContextWhenHidden: true }
   );
@@ -185,7 +185,7 @@ function openViewer(context, document) {
       } else if (msg.type === "copy") {
         vscode.env.clipboard.writeText(msg.value);
         vscode.window.setStatusBarMessage(
-          `JSON Viewer: copied ${msg.label}`,
+          `Json Viewer: Inspector Tree: copied ${msg.label}`,
           2000
         );
       } else if (msg.type === "copyRaw" && typeof msg.path === "string") {
@@ -194,7 +194,10 @@ function openViewer(context, document) {
         const entry = offsetMap.get(msg.path);
         if (entry) {
           vscode.env.clipboard.writeText(parsedText.slice(entry.val, entry.end));
-          vscode.window.setStatusBarMessage("JSON Viewer: copied value", 2000);
+          vscode.window.setStatusBarMessage(
+            "Json Viewer: Inspector Tree: copied value",
+            2000
+          );
         }
       } else if (msg.type === "reveal" && typeof msg.path === "string") {
         if (document.getText() !== parsedText) post();
@@ -699,7 +702,7 @@ function wrap(n, key, path, depth) {
       wrap(ch, ch.k, path + "." + escapeKey(ch.k), depth + 1)
     );
   } else if (n.t === "array") {
-    // Zero-pad indices so a list reads 000, 001, … 010 like PyCharm's view.
+    // Zero-pad indices so long lists still scan in numeric order.
     const pad = String(Math.max(0, n.c.length - 1)).length;
     node.children = n.c.map((ch, i) =>
       wrap(ch, String(i).padStart(pad, "0"), path + "[" + i + "]", depth + 1)
@@ -722,7 +725,7 @@ function numKind(node) {
   return /[.eE]/.test(node.raw) ? "float" : "int";
 }
 
-// Python-style type name, to mirror PyCharm's {dict} / {list} / {str} labels.
+// Python-style type names keep object/list/string labels compact in the tree.
 function pyType(node) {
   switch (node.type) {
     case "object": return "dict";
@@ -897,7 +900,7 @@ function rowEl(node, q) {
   }
   row.appendChild(tw);
 
-  // key = {type} …   (PyCharm-style row)
+  // key = {type} …   (inspector-style row)
   const key = document.createElement("span");
   key.className = "key";
   key.textContent = node.key;
