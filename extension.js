@@ -15,6 +15,16 @@ const LARGE_FILE_DEFAULT_SOURCE_PREVIEW_KB = 64;
  */
 const panels = new Map();
 
+function disposeAll(disposables) {
+  while (disposables.length) {
+    try {
+      disposables.pop().dispose();
+    } catch (_e) {
+      // Best-effort cleanup; one bad disposable should not retain the rest.
+    }
+  }
+}
+
 function activate(context) {
   const openCommand = vscode.commands.registerCommand(
     "jsonViewer.open",
@@ -171,14 +181,7 @@ function openViewer(context, document) {
 
   panels.set(key, panel);
 
-  const config = vscode.workspace.getConfiguration("jsonViewer");
-  // Default expand level differs by file type: JSON opens with top-level
-  // entries collapsed (level 0); JSONL opens with the record list shown but each
-  // record collapsed (level 0). Root is level 0.
-  const expandLevel = isLineDelimited(document)
-    ? config.get("expandLevelJsonl", 0)
-    : config.get("expandLevel", 0);
-  const liveUpdate = config.get("liveUpdate", true);
+  const { expandLevel, liveUpdate } = getViewerOptions(document);
 
   panel.webview.html = getHtml(panel.webview, expandLevel);
 
@@ -187,8 +190,11 @@ function openViewer(context, document) {
   let offsetMap = new Map();
   let parsedText = "";
   let parseTimer;
+  let disposed = false;
+  const panelDisposables = [];
 
   const post = () => {
+    if (disposed) return;
     if (parseTimer) {
       clearTimeout(parseTimer);
       parseTimer = undefined;
@@ -209,6 +215,7 @@ function openViewer(context, document) {
   };
 
   const schedulePost = () => {
+    if (disposed) return;
     if (parseTimer) clearTimeout(parseTimer);
     parseTimer = setTimeout(() => {
       parseTimer = undefined;
@@ -219,6 +226,7 @@ function openViewer(context, document) {
   // Push the first payload once the webview signals it is ready.
   panel.webview.onDidReceiveMessage(
     (msg) => {
+      if (disposed) return;
       if (msg.type === "ready") {
         post();
       } else if (msg.type === "copy") {
@@ -251,28 +259,44 @@ function openViewer(context, document) {
       }
     },
     undefined,
-    context.subscriptions
+    panelDisposables
   );
 
-  let changeSub;
   if (liveUpdate) {
-    changeSub = vscode.workspace.onDidChangeTextDocument((e) => {
+    panelDisposables.push(vscode.workspace.onDidChangeTextDocument((e) => {
       if (e.document.uri.toString() === key) {
         schedulePost();
       }
-    });
-    context.subscriptions.push(changeSub);
+    }));
   }
 
   panel.onDidDispose(
     () => {
+      disposed = true;
       panels.delete(key);
-      if (parseTimer) clearTimeout(parseTimer);
-      if (changeSub) changeSub.dispose();
-    },
-    null,
-    context.subscriptions
+      if (parseTimer) {
+        clearTimeout(parseTimer);
+        parseTimer = undefined;
+      }
+      parsedText = "";
+      offsetMap = new Map();
+      disposeAll(panelDisposables);
+    }
   );
+}
+
+function getViewerOptions(document) {
+  const config = vscode.workspace.getConfiguration("jsonViewer");
+  // Default expand level differs by file type: JSON opens with top-level
+  // entries collapsed (level 0); JSONL opens with the record list shown but each
+  // record collapsed (level 0). Root is level 0.
+  const expandLevel = isLineDelimited(document)
+    ? config.get("expandLevelJsonl", 0)
+    : config.get("expandLevel", 0);
+  return {
+    expandLevel,
+    liveUpdate: config.get("liveUpdate", true),
+  };
 }
 
 function getLargeFileOptions() {
@@ -384,8 +408,10 @@ function openLargeFileViewer(context, uri) {
   let indexState = null;
   let offsetMap = new Map();
   let loadingRange = false;
+  const panelDisposables = [];
 
   const postStatus = (text) => {
+    if (disposed) return;
     panel.webview.postMessage({
       type: "largeStatus",
       name: path.basename(uri.fsPath),
@@ -434,6 +460,7 @@ function openLargeFileViewer(context, uri) {
 
   panel.webview.onDidReceiveMessage(
     async (msg) => {
+      if (disposed) return;
       if (msg.type === "ready") {
         load();
       } else if (msg.type === "copy") {
@@ -453,6 +480,7 @@ function openLargeFileViewer(context, uri) {
           return;
         }
         const value = await readUtf8Range(uri.fsPath, entry.val, entry.end);
+        if (disposed) return;
         vscode.env.clipboard.writeText(value);
         vscode.window.setStatusBarMessage(
           "JSON Viewer: Tree Inspector: copied value",
@@ -467,6 +495,7 @@ function openLargeFileViewer(context, uri) {
           msg.which === "key" ? entry.key : entry.end,
           options.sourcePreviewBytes
         );
+        if (disposed) return;
         panel.webview.postMessage({
           type: "sourcePreview",
           path: msg.path,
@@ -484,8 +513,10 @@ function openLargeFileViewer(context, uri) {
             uri.fsPath,
             indexState,
             startIndex,
-            pageOptions
+            pageOptions,
+            cancelToken
           );
+          if (disposed) return;
           offsetMap = rootOffsetMap(indexState);
           for (const [k, v] of page.offsets) offsetMap.set(k, v);
           indexState.currentStart = page.start;
@@ -497,6 +528,7 @@ function openLargeFileViewer(context, uri) {
             large: largeFileMeta(indexState, page.start, page.children.length, count),
           });
         } catch (e) {
+          if (disposed) return;
           panel.webview.postMessage({
             type: "largeRangeError",
             error: e && e.message ? e.message : String(e),
@@ -527,7 +559,7 @@ function openLargeFileViewer(context, uri) {
             options,
             searchToken
           );
-          if (searchToken.cancelled) return;
+          if (disposed || searchToken.cancelled) return;
           for (const [k, v] of results.offsets) offsetMap.set(k, v);
           panel.webview.postMessage({
             type: "largeSearchResults",
@@ -546,7 +578,7 @@ function openLargeFileViewer(context, uri) {
             },
           });
         } catch (e) {
-          if (searchToken.cancelled) return;
+          if (disposed || searchToken.cancelled) return;
           panel.webview.postMessage({
             type: "largeSearchError",
             seq,
@@ -556,7 +588,7 @@ function openLargeFileViewer(context, uri) {
       }
     },
     undefined,
-    context.subscriptions
+    panelDisposables
   );
 
   panel.onDidDispose(
@@ -567,9 +599,8 @@ function openLargeFileViewer(context, uri) {
       panels.delete(key);
       indexState = null;
       offsetMap = new Map();
-    },
-    null,
-    context.subscriptions
+      disposeAll(panelDisposables);
+    }
   );
 }
 
@@ -966,6 +997,18 @@ async function readJsonKeyRange(fileName, start, end) {
   }
 }
 
+function jsonlRecordLimit(options) {
+  return Math.max(1024, Math.floor(Number(options.maxCopyBytes) || 1024));
+}
+
+function assertJsonlRecordWithinLimit(size, limit) {
+  if (size > limit) {
+    throw new Error(
+      `JSONL record exceeds ${formatBytes(limit)} large-file record preview limit.`
+    );
+  }
+}
+
 async function buildLargeFilePreview(fileName, options, onProgress, cancelToken) {
   if (isJsoncFile(fileName)) {
     throw new Error(
@@ -986,6 +1029,7 @@ async function buildLargeJsonlPreview(fileName, options, onProgress, cancelToken
   const children = [];
   const errors = [];
   const previewLimit = options.previewEntries;
+  const recordLimit = jsonlRecordLimit(options);
   const pageCursors = [];
 
   let bytesRead = 0;
@@ -996,6 +1040,7 @@ async function buildLargeJsonlPreview(fileName, options, onProgress, cancelToken
   let records = 0;
 
   const scanLine = (lineBuf, lineStart) => {
+    assertJsonlRecordWithinLimit(lineBuf.length, recordLimit);
     let start = 0;
     let end = lineBuf.length;
     if (end > start && lineBuf[end - 1] === 13) end--;
@@ -1034,26 +1079,31 @@ async function buildLargeJsonlPreview(fileName, options, onProgress, cancelToken
   await new Promise((resolve, reject) => {
     const stream = fs.createReadStream(fileName, { highWaterMark: 1024 * 1024 });
     stream.on("data", (chunk) => {
-      if (cancelToken && cancelToken.cancelled) {
-        stream.destroy(new Error("Large-file indexing cancelled."));
-        return;
-      }
-      const buf = carry.length ? Buffer.concat([carry, chunk]) : chunk;
-      let lineStart = carryStart;
-      let start = 0;
-      let nl;
-      while ((nl = buf.indexOf(10, start)) !== -1) {
-        scanLine(buf.subarray(start, nl), lineStart);
-        start = nl + 1;
-        lineStart = carryStart + start;
-        lineNo++;
-      }
-      carry = buf.subarray(start);
-      carryStart = lineStart;
-      bytesRead += chunk.length;
-      if (bytesRead - lastProgress >= 64 * 1024 * 1024) {
-        lastProgress = bytesRead;
-        onProgress && onProgress({ bytesRead, entries: records });
+      try {
+        if (cancelToken && cancelToken.cancelled) {
+          stream.destroy(new Error("Large-file indexing cancelled."));
+          return;
+        }
+        const buf = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+        let lineStart = carryStart;
+        let start = 0;
+        let nl;
+        while ((nl = buf.indexOf(10, start)) !== -1) {
+          scanLine(buf.subarray(start, nl), lineStart);
+          start = nl + 1;
+          lineStart = carryStart + start;
+          lineNo++;
+        }
+        carry = buf.subarray(start);
+        assertJsonlRecordWithinLimit(carry.length, recordLimit);
+        carryStart = lineStart;
+        bytesRead += chunk.length;
+        if (bytesRead - lastProgress >= 64 * 1024 * 1024) {
+          lastProgress = bytesRead;
+          onProgress && onProgress({ bytesRead, entries: records });
+        }
+      } catch (e) {
+        stream.destroy(e);
       }
     });
     stream.on("error", reject);
@@ -1109,7 +1159,8 @@ async function buildLargeJsonPreview(fileName, options, onProgress, cancelToken)
     scanned.rootType,
     scanned.entries.slice(0, previewLimit),
     0,
-    options
+    options,
+    cancelToken
   );
   const offsets = projected.offsets;
   const children = projected.children;
@@ -1137,11 +1188,11 @@ async function buildLargeJsonPreview(fileName, options, onProgress, cancelToken)
   };
 }
 
-async function buildLargeFilePage(fileName, indexState, startIndex, options) {
+async function buildLargeFilePage(fileName, indexState, startIndex, options, cancelToken) {
   if (indexState.mode === "jsonl") {
-    return buildLargeJsonlPage(fileName, indexState, startIndex, options);
+    return buildLargeJsonlPage(fileName, indexState, startIndex, options, cancelToken);
   }
-  return buildLargeJsonPage(fileName, indexState, startIndex, options);
+  return buildLargeJsonPage(fileName, indexState, startIndex, options, cancelToken);
 }
 
 function findPageCursor(indexState, startIndex) {
@@ -1158,7 +1209,7 @@ function findPageCursor(indexState, startIndex) {
   return best;
 }
 
-async function buildLargeJsonlPage(fileName, indexState, startIndex, options) {
+async function buildLargeJsonlPage(fileName, indexState, startIndex, options, cancelToken) {
   const cursor = findPageCursor(indexState, startIndex);
   const skip = startIndex - cursor.index;
   const scanned = await scanLargeJsonlPageFromOffset(
@@ -1166,12 +1217,17 @@ async function buildLargeJsonlPage(fileName, indexState, startIndex, options) {
     cursor.offset,
     options.previewEntries + skip,
     cursor.index,
-    cursor.line || 1
+    cursor.line || 1,
+    options,
+    cancelToken
   );
   const selected = scanned.entries.slice(skip, skip + options.previewEntries);
   const offsets = new Map();
   const children = [];
   for (let i = 0; i < selected.length; i++) {
+    if (cancelToken && cancelToken.cancelled) {
+      throw new Error("Large-file page load cancelled.");
+    }
     const entry = selected[i];
     const text = await readUtf8Range(fileName, entry.valStart, entry.valEnd);
     const node = parseToTree(text);
@@ -1190,14 +1246,15 @@ async function buildLargeJsonlPage(fileName, indexState, startIndex, options) {
   return { start: startIndex, children, offsets };
 }
 
-async function buildLargeJsonPage(fileName, indexState, startIndex, options) {
+async function buildLargeJsonPage(fileName, indexState, startIndex, options, cancelToken) {
   const cursor = findPageCursor(indexState, startIndex);
   const skip = startIndex - cursor.index;
   const scanned = await scanJsonTopLevelPageFromOffset(
     fileName,
     indexState.rootType,
     cursor.offset,
-    options.previewEntries + skip
+    options.previewEntries + skip,
+    cancelToken
   );
   const selected = scanned.entries.slice(skip, skip + options.previewEntries);
   const projected = await projectLargeJsonEntries(
@@ -1205,7 +1262,8 @@ async function buildLargeJsonPage(fileName, indexState, startIndex, options) {
     indexState.rootType,
     selected,
     startIndex,
-    options
+    options,
+    cancelToken
   );
   return { start: startIndex, children: projected.children, offsets: projected.offsets };
 }
@@ -1215,15 +1273,19 @@ async function scanLargeJsonlPageFromOffset(
   offset,
   limit,
   startRecordIndex,
-  startLineNo
+  startLineNo,
+  options,
+  cancelToken
 ) {
   const entries = [];
+  const recordLimit = jsonlRecordLimit(options);
   let carry = Buffer.alloc(0);
   let carryStart = offset;
   let lineNo = startLineNo;
   let recordIndex = startRecordIndex;
 
   const scanLine = (lineBuf, lineStart) => {
+    assertJsonlRecordWithinLimit(lineBuf.length, recordLimit);
     let start = 0;
     let end = lineBuf.length;
     if (end > start && lineBuf[end - 1] === 13) end--;
@@ -1249,23 +1311,32 @@ async function scanLargeJsonlPageFromOffset(
       highWaterMark: 1024 * 1024,
     });
     stream.on("data", (chunk) => {
-      const buf = carry.length ? Buffer.concat([carry, chunk]) : chunk;
-      let lineStart = carryStart;
-      let start = 0;
-      let nl;
-      while ((nl = buf.indexOf(10, start)) !== -1) {
-        scanLine(buf.subarray(start, nl), lineStart);
-        if (entries.length >= limit) {
-          stream.destroy();
-          resolve();
+      try {
+        if (cancelToken && cancelToken.cancelled) {
+          stream.destroy(new Error("Large-file page load cancelled."));
           return;
         }
-        start = nl + 1;
-        lineStart = carryStart + start;
-        lineNo++;
+        const buf = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+        let lineStart = carryStart;
+        let start = 0;
+        let nl;
+        while ((nl = buf.indexOf(10, start)) !== -1) {
+          scanLine(buf.subarray(start, nl), lineStart);
+          if (entries.length >= limit) {
+            stream.destroy();
+            resolve();
+            return;
+          }
+          start = nl + 1;
+          lineStart = carryStart + start;
+          lineNo++;
+        }
+        carry = buf.subarray(start);
+        assertJsonlRecordWithinLimit(carry.length, recordLimit);
+        carryStart = lineStart;
+      } catch (e) {
+        stream.destroy(e);
       }
-      carry = buf.subarray(start);
-      carryStart = lineStart;
     });
     stream.on("error", reject);
     stream.on("end", () => {
@@ -1282,13 +1353,19 @@ async function scanLargeJsonlPageFromOffset(
   return { entries };
 }
 
-async function scanJsonTopLevelPageFromOffset(fileName, rootType, offset, limit) {
+async function scanJsonTopLevelPageFromOffset(
+  fileName,
+  rootType,
+  offset,
+  limit,
+  cancelToken
+) {
   return rootType === "array"
-    ? scanJsonArrayPageFromOffset(fileName, offset, limit)
-    : scanJsonObjectPageFromOffset(fileName, offset, limit);
+    ? scanJsonArrayPageFromOffset(fileName, offset, limit, cancelToken)
+    : scanJsonObjectPageFromOffset(fileName, offset, limit, cancelToken);
 }
 
-async function scanJsonArrayPageFromOffset(fileName, offset, limit) {
+async function scanJsonArrayPageFromOffset(fileName, offset, limit, cancelToken) {
   const entries = [];
   let depth = 0;
   let inString = false;
@@ -1311,6 +1388,10 @@ async function scanJsonArrayPageFromOffset(fileName, offset, limit) {
     });
     stream.on("data", (chunk) => {
       try {
+        if (cancelToken && cancelToken.cancelled) {
+          stream.destroy(new Error("Large-file page load cancelled."));
+          return;
+        }
         for (let i = 0; i < chunk.length; i++) {
           const b = chunk[i];
           const pos = offset + i;
@@ -1377,7 +1458,7 @@ async function scanJsonArrayPageFromOffset(fileName, offset, limit) {
   return { entries };
 }
 
-async function scanJsonObjectPageFromOffset(fileName, offset, limit) {
+async function scanJsonObjectPageFromOffset(fileName, offset, limit, cancelToken) {
   const entries = [];
   let depth = 0;
   let inString = false;
@@ -1411,6 +1492,10 @@ async function scanJsonObjectPageFromOffset(fileName, offset, limit) {
     });
     stream.on("data", (chunk) => {
       try {
+        if (cancelToken && cancelToken.cancelled) {
+          stream.destroy(new Error("Large-file page load cancelled."));
+          return;
+        }
         for (let i = 0; i < chunk.length; i++) {
           const b = chunk[i];
           const pos = offset + i;
@@ -1516,12 +1601,14 @@ async function searchLargeJsonl(fileName, query, options, cancelToken) {
   const q = query.toLowerCase();
   const offsets = new Map();
   const children = [];
+  const recordLimit = jsonlRecordLimit(options);
   let totalMatches = 0;
   let carry = Buffer.alloc(0);
   let carryStart = 0;
   let recordIndex = 0;
 
   const scanLine = (lineBuf, lineStart) => {
+    assertJsonlRecordWithinLimit(lineBuf.length, recordLimit);
     let start = 0;
     let end = lineBuf.length;
     if (end > start && lineBuf[end - 1] === 13) end--;
@@ -1558,21 +1645,26 @@ async function searchLargeJsonl(fileName, query, options, cancelToken) {
   await new Promise((resolve, reject) => {
     const stream = fs.createReadStream(fileName, { highWaterMark: 1024 * 1024 });
     stream.on("data", (chunk) => {
-      if (cancelToken && cancelToken.cancelled) {
-        stream.destroy(new Error("Large-file search cancelled."));
-        return;
+      try {
+        if (cancelToken && cancelToken.cancelled) {
+          stream.destroy(new Error("Large-file search cancelled."));
+          return;
+        }
+        const buf = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+        let lineStart = carryStart;
+        let start = 0;
+        let nl;
+        while ((nl = buf.indexOf(10, start)) !== -1) {
+          scanLine(buf.subarray(start, nl), lineStart);
+          start = nl + 1;
+          lineStart = carryStart + start;
+        }
+        carry = buf.subarray(start);
+        assertJsonlRecordWithinLimit(carry.length, recordLimit);
+        carryStart = lineStart;
+      } catch (e) {
+        stream.destroy(e);
       }
-      const buf = carry.length ? Buffer.concat([carry, chunk]) : chunk;
-      let lineStart = carryStart;
-      let start = 0;
-      let nl;
-      while ((nl = buf.indexOf(10, start)) !== -1) {
-        scanLine(buf.subarray(start, nl), lineStart);
-        start = nl + 1;
-        lineStart = carryStart + start;
-      }
-      carry = buf.subarray(start);
-      carryStart = lineStart;
     });
     stream.on("error", reject);
     stream.on("end", () => {
@@ -1604,7 +1696,8 @@ async function searchLargeJson(fileName, indexState, query, options, cancelToken
         fileName,
         indexState.rootType,
         cursor.offset,
-        pageSize
+        pageSize,
+        cancelToken
       );
       for (let i = 0; i < scanned.entries.length; i++) {
         if (cancelToken && cancelToken.cancelled) {
@@ -1643,7 +1736,8 @@ async function searchLargeJson(fileName, indexState, query, options, cancelToken
           indexState.rootType,
           [entry],
           globalIndex,
-          options
+          options,
+          cancelToken
         );
         for (const [k, v] of projected.offsets) offsets.set(k, v);
         children.push(projected.children[0]);
@@ -1691,12 +1785,16 @@ async function projectLargeJsonEntries(
   rootType,
   entries,
   startIndex,
-  options
+  options,
+  cancelToken
 ) {
   const offsets = new Map();
   const children = [];
 
   for (let i = 0; i < entries.length; i++) {
+    if (cancelToken && cancelToken.cancelled) {
+      throw new Error("Large-file page load cancelled.");
+    }
     const entry = entries[i];
     const globalIndex = startIndex + i;
     let entryKey = entry.key;
@@ -2295,6 +2393,7 @@ const sourceTitleEl = document.getElementById("sourceTitle");
 const sourceTextEl = document.getElementById("sourceText");
 const copySourceRangeBtn = document.getElementById("copySourceRange");
 let lastSourceRange = "";
+let lastSourceText = "";
 
 let model = null;       // root node
 let normalModel = null;
@@ -2430,15 +2529,46 @@ window.addEventListener("blur", closeMenu);
 document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeMenu(); });
 
 function showMenu(x, y, node) {
-  closeMenu();
-  menuEl = document.createElement("div");
-  menuEl.className = "ctxmenu";
-  const items = [
+  showContextMenu(x, y, [
     ["Copy structure", "", function () { copyStructure(node); }],
     ["Copy value", "", function () { copyNodeValue(node); }],
     ["Copy path", "", function () { vscode.postMessage({ type: "copy", value: node.path, label: "path" }); }],
     ["Jump to source", "", function () { jumpTo(node, "value"); }],
-  ];
+  ]);
+}
+
+function showSourceMenu(x, y) {
+  const selected = selectedSourceText();
+  const items = [];
+  if (selected) {
+    items.push(["Copy selection", "", function () {
+      vscode.postMessage({ type: "copy", value: selected, label: "selection" });
+    }]);
+  }
+  items.push(
+    ["Copy preview", "", function () {
+      vscode.postMessage({ type: "copy", value: lastSourceText, label: "source preview" });
+    }],
+    ["Copy byte range", "", function () {
+      if (lastSourceRange) vscode.postMessage({ type: "copy", value: lastSourceRange, label: "byte range" });
+    }],
+    ["Close preview", "", function () { sourcePreviewEl.hidden = true; }]
+  );
+  showContextMenu(x, y, items);
+}
+
+function selectedSourceText() {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return "";
+  const range = selection.getRangeAt(0);
+  if (!sourcePreviewEl.contains(range.commonAncestorContainer)) return "";
+  return selection.toString();
+}
+
+function showContextMenu(x, y, items) {
+  closeMenu();
+  menuEl = document.createElement("div");
+  menuEl.className = "ctxmenu";
   for (const it of items) {
     const el = document.createElement("div");
     el.className = "ctxitem";
@@ -2586,6 +2716,12 @@ document.getElementById("closeSourcePreview").addEventListener("click", () => {
 
 copySourceRangeBtn.addEventListener("click", () => {
   if (lastSourceRange) vscode.postMessage({ type: "copy", value: lastSourceRange, label: "byte range" });
+});
+
+sourcePreviewEl.addEventListener("contextmenu", (e) => {
+  if (e.target && e.target.closest && e.target.closest("button")) return;
+  e.preventDefault();
+  showSourceMenu(e.clientX, e.clientY);
 });
 
 function requestLargeRange(start, count) {
@@ -2829,6 +2965,7 @@ function showSourcePreview(msg) {
   const start = Math.max(0, Math.min(text.length, msg.highlightStart || 0));
   const end = Math.max(start, Math.min(text.length, msg.highlightEnd || start));
   lastSourceRange = String(msg.targetStart) + "-" + String(msg.targetEnd);
+  lastSourceText = text;
   sourceTitleEl.textContent =
     (msg.path || "source") +
     " · bytes " + lastSourceRange +
@@ -2871,6 +3008,8 @@ module.exports = {
     jsoncToJson,
     parseDocumentText,
     parseToTree,
+    getViewerOptions,
+    getLargeFileOptions,
     buildLargeFilePreview,
     buildLargeFilePage,
     searchLargeFile,

@@ -126,6 +126,43 @@ function byteSlice(text, entry) {
 
 (async () => {
   {
+    const props = require("./package.json").contributes.configuration.properties;
+    for (const key of [
+      "jsonViewer.expandLevel",
+      "jsonViewer.expandLevelJsonl",
+      "jsonViewer.liveUpdate",
+      "jsonViewer.largeFileThresholdMb",
+      "jsonViewer.largeFilePreviewEntries",
+      "jsonViewer.largeFileMaxCopyMb",
+      "jsonViewer.largeFileSourcePreviewKb",
+    ]) {
+      assert(props[key], `missing configuration ${key}`);
+    }
+
+    configValues = {
+      expandLevel: 2,
+      expandLevelJsonl: 3,
+      liveUpdate: false,
+      largeFilePreviewEntries: 17,
+      largeFileMaxCopyMb: 2,
+      largeFileSourcePreviewKb: 8,
+    };
+    assert.deepEqual(_test.getViewerOptions({ fileName: "sample.json" }), {
+      expandLevel: 2,
+      liveUpdate: false,
+    });
+    assert.deepEqual(_test.getViewerOptions({ fileName: "sample.jsonl" }), {
+      expandLevel: 3,
+      liveUpdate: false,
+    });
+    const largeOptions = _test.getLargeFileOptions();
+    assert.equal(largeOptions.previewEntries, 17);
+    assert.equal(largeOptions.maxCopyBytes, 2 * 1024 * 1024);
+    assert.equal(largeOptions.sourcePreviewBytes, 8 * 1024);
+    configValues = {};
+  }
+
+  {
     const jsonFile = writeTemp("large-mode-config.json", "{}");
     fs.truncateSync(jsonFile, 2 * 1024 * 1024);
     const uri = { scheme: "file", fsPath: jsonFile };
@@ -225,6 +262,10 @@ function byteSlice(text, entry) {
     assert.equal(page.children[0].k, "3");
     assert.equal(byteSlice(text, page.offsets.get("$[3]")), "3");
     assert.equal(byteSlice(text, page.offsets.get("$[4]")), "4");
+    await assert.rejects(
+      () => _test.buildLargeFilePage(file, preview, 3, options, { cancelled: true }),
+      /cancelled/
+    );
   }
 
   {
@@ -293,6 +334,18 @@ function byteSlice(text, entry) {
     const search = await _test.searchLargeFile(file, preview, "café", options);
     assert.equal(search.totalMatches, 1);
     assert.equal(byteSlice(text, search.offsets.get("$[1].word")), '"café"');
+  }
+
+  {
+    const file = writeTemp("large-jsonl-oversize-line.jsonl", '{"big":"' + "x".repeat(2048) + '"}\n');
+    await assert.rejects(
+      () =>
+        _test.buildLargeFilePreview(file, {
+          previewEntries: 10,
+          maxCopyBytes: 32,
+        }),
+      /JSONL record exceeds/
+    );
   }
 
   console.log("parser tests ok");
