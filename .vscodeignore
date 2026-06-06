@@ -12,3 +12,4 @@ scripts/**
 media/*.gif
 **/*.map
 .gitignore
+.DS_Store

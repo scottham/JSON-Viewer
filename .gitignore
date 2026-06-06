@@ -2,3 +2,4 @@ node_modules/
 *.vsix
 *.log
 .DS_Store
+sample-large-1gb.json

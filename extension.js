@@ -1,5 +1,11 @@
 const vscode = require("vscode");
+const fs = require("fs");
 const path = require("path");
+
+const LARGE_FILE_DEFAULT_THRESHOLD_MB = 45;
+const LARGE_FILE_DEFAULT_PREVIEW_ENTRIES = 1000;
+const LARGE_FILE_DEFAULT_MAX_COPY_MB = 32;
+const LARGE_FILE_DEFAULT_SOURCE_PREVIEW_KB = 64;
 
 /**
  * Map of document URI string -> active webview panel, so re-running the
@@ -17,8 +23,17 @@ function activate(context) {
       // active editor) or the explorer context menu (passes the resource uri).
       let document;
       if (uri && uri instanceof vscode.Uri) {
+        if (await shouldUseLargeFileMode(uri)) {
+          openLargeFileViewer(context, uri);
+          return;
+        }
         document = await vscode.workspace.openTextDocument(uri);
       } else if (vscode.window.activeTextEditor) {
+        const activeUri = vscode.window.activeTextEditor.document.uri;
+        if (await shouldUseLargeFileMode(activeUri)) {
+          openLargeFileViewer(context, activeUri);
+          return;
+        }
         document = vscode.window.activeTextEditor.document;
       }
 
@@ -34,6 +49,30 @@ function activate(context) {
   );
 
   context.subscriptions.push(openCommand);
+}
+
+async function shouldUseLargeFileMode(uri) {
+  if (!uri || uri.scheme !== "file") return false;
+  const fileName = uri.fsPath || uri.path || "";
+  if (!isLargeFileModeSupportedFile(fileName)) return false;
+
+  const config = vscode.workspace.getConfiguration("jsonViewer");
+  const thresholdMb = Number(
+    config.get("largeFileThresholdMb", LARGE_FILE_DEFAULT_THRESHOLD_MB)
+  );
+  if (!Number.isFinite(thresholdMb) || thresholdMb < 0) return false;
+
+  try {
+    const stat = await vscode.workspace.fs.stat(uri);
+    return stat.size >= thresholdMb * 1024 * 1024;
+  } catch (_e) {
+    return false;
+  }
+}
+
+function isLargeFileModeSupportedFile(fileName) {
+  const ext = path.extname(fileName).toLowerCase();
+  return ext === ".json" || ext === ".jsonl" || ext === ".ndjson";
 }
 
 // JSONL / NDJSON are detected by file extension. Each non-blank line is an
@@ -230,6 +269,304 @@ function openViewer(context, document) {
       panels.delete(key);
       if (parseTimer) clearTimeout(parseTimer);
       if (changeSub) changeSub.dispose();
+    },
+    null,
+    context.subscriptions
+  );
+}
+
+function getLargeFileOptions() {
+  const config = vscode.workspace.getConfiguration("jsonViewer");
+  const previewEntries = Math.max(
+    1,
+    Math.floor(
+      Number(
+        config.get(
+          "largeFilePreviewEntries",
+          LARGE_FILE_DEFAULT_PREVIEW_ENTRIES
+        )
+      ) || LARGE_FILE_DEFAULT_PREVIEW_ENTRIES
+    )
+  );
+  const maxCopyBytes = Math.max(
+    1024,
+    Math.floor(
+      (Number(
+        config.get("largeFileMaxCopyMb", LARGE_FILE_DEFAULT_MAX_COPY_MB)
+      ) || LARGE_FILE_DEFAULT_MAX_COPY_MB) *
+        1024 *
+        1024
+    )
+  );
+  const sourcePreviewBytes = Math.max(
+    4096,
+    Math.floor(
+      (Number(
+        config.get(
+          "largeFileSourcePreviewKb",
+          LARGE_FILE_DEFAULT_SOURCE_PREVIEW_KB
+        )
+      ) || LARGE_FILE_DEFAULT_SOURCE_PREVIEW_KB) * 1024
+    )
+  );
+  return { previewEntries, maxCopyBytes, sourcePreviewBytes };
+}
+
+function clampLargeStartIndex(value, totalEntries) {
+  const total = Math.max(0, Math.floor(Number(totalEntries) || 0));
+  if (total === 0) return 0;
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(n, total - 1));
+}
+
+function clampLargePageSize(value, configuredPageSize) {
+  const max = Math.max(1, Math.floor(Number(configuredPageSize) || 1));
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n) || n < 1) return max;
+  return Math.max(1, Math.min(n, max));
+}
+
+function rootOffsetMap(indexState) {
+  const offsets = new Map();
+  const root = indexState && indexState.offsets && indexState.offsets.get("$");
+  if (root) offsets.set("$", root);
+  return offsets;
+}
+
+function largeFileMeta(indexState, pageStart, shownEntries, pageSize) {
+  const total = Math.max(0, Number(indexState.totalEntries) || 0);
+  const start = total ? clampLargeStartIndex(pageStart, total) : 0;
+  const shown = Math.max(0, Math.floor(Number(shownEntries) || 0));
+  const maxPageSize = Math.max(1, Math.floor(Number(indexState.pageSize) || shown || 1));
+  const pageCount = clampLargePageSize(pageSize || shown || maxPageSize, maxPageSize);
+  const end = Math.min(total, start + shown);
+  return {
+    fileSize: indexState.fileSize,
+    rootType: indexState.rootType,
+    totalEntries: total,
+    shownEntries: shown,
+    indexedEntries: indexState.indexedEntries,
+    truncated: end < total,
+    mode: indexState.mode,
+    pageStart: start,
+    pageEnd: end,
+    pageSize: maxPageSize,
+    pageCount,
+    canPrevious: start > 0,
+    canNext: end < total,
+    canLoadMore: end < total,
+  };
+}
+
+function openLargeFileViewer(context, uri) {
+  const key = "large:" + uri.toString();
+  const existing = panels.get(key);
+  if (existing) {
+    existing.reveal(vscode.ViewColumn.Beside);
+    return;
+  }
+
+  const options = getLargeFileOptions();
+  const panel = vscode.window.createWebviewPanel(
+    "jsonViewer",
+    `JSON Viewer: Tree Inspector: ${path.basename(uri.fsPath)}`,
+    vscode.ViewColumn.Beside,
+    { enableScripts: true, retainContextWhenHidden: true }
+  );
+
+  panels.set(key, panel);
+  panel.webview.html = getHtml(panel.webview, 0);
+
+  let disposed = false;
+  const cancelToken = { cancelled: false };
+  let searchToken = null;
+  let indexState = null;
+  let offsetMap = new Map();
+  let loadingRange = false;
+
+  const postStatus = (text) => {
+    panel.webview.postMessage({
+      type: "largeStatus",
+      name: path.basename(uri.fsPath),
+      text,
+    });
+  };
+
+  const load = async () => {
+    try {
+      postStatus("Large file mode: indexing top-level entries...");
+      indexState = await buildLargeFilePreview(
+        uri.fsPath,
+        options,
+        (progress) => {
+          if (!disposed) {
+            postStatus(
+              `Large file mode: indexed ${progress.entries.toLocaleString()} entries · ` +
+                `${formatBytes(progress.bytesRead)} read`
+            );
+          }
+        },
+        cancelToken
+      );
+      if (disposed) return;
+      indexState.currentStart = 0;
+      offsetMap = indexState.offsets;
+      panel.webview.postMessage({
+        type: "load",
+        name: path.basename(uri.fsPath),
+        ok: true,
+        tree: indexState.tree,
+        jsonl: indexState.jsonl,
+        errors: indexState.errors,
+        large: largeFileMeta(indexState, 0, indexState.shownEntries),
+      });
+    } catch (e) {
+      if (disposed) return;
+      panel.webview.postMessage({
+        type: "load",
+        name: path.basename(uri.fsPath),
+        ok: false,
+        error: e && e.message ? e.message : String(e),
+      });
+    }
+  };
+
+  panel.webview.onDidReceiveMessage(
+    async (msg) => {
+      if (msg.type === "ready") {
+        load();
+      } else if (msg.type === "copy") {
+        vscode.env.clipboard.writeText(msg.value);
+        vscode.window.setStatusBarMessage(
+          `JSON Viewer: Tree Inspector: copied ${msg.label}`,
+          2000
+        );
+      } else if (msg.type === "copyRaw" && typeof msg.path === "string") {
+        const entry = offsetMap.get(msg.path);
+        if (!entry) return;
+        const size = entry.end - entry.val;
+        if (size > options.maxCopyBytes) {
+          vscode.window.showWarningMessage(
+            `Value is ${formatBytes(size)}. Large-file mode copy limit is ${formatBytes(options.maxCopyBytes)}.`
+          );
+          return;
+        }
+        const value = await readUtf8Range(uri.fsPath, entry.val, entry.end);
+        vscode.env.clipboard.writeText(value);
+        vscode.window.setStatusBarMessage(
+          "JSON Viewer: Tree Inspector: copied value",
+          2000
+        );
+      } else if (msg.type === "reveal" && typeof msg.path === "string") {
+        const entry = offsetMap.get(msg.path);
+        if (!entry) return;
+        const preview = await readSourcePreview(
+          uri.fsPath,
+          msg.which === "key" ? entry.key : entry.val,
+          msg.which === "key" ? entry.key : entry.end,
+          options.sourcePreviewBytes
+        );
+        panel.webview.postMessage({
+          type: "sourcePreview",
+          path: msg.path,
+          which: msg.which || "value",
+          ...preview,
+        });
+      } else if (msg.type === "largeLoadRange") {
+        if (!indexState || loadingRange) return;
+        const startIndex = clampLargeStartIndex(msg.start, indexState.totalEntries);
+        const count = clampLargePageSize(msg.count, options.previewEntries);
+        loadingRange = true;
+        try {
+          const pageOptions = { ...options, previewEntries: count };
+          const page = await buildLargeFilePage(
+            uri.fsPath,
+            indexState,
+            startIndex,
+            pageOptions
+          );
+          offsetMap = rootOffsetMap(indexState);
+          for (const [k, v] of page.offsets) offsetMap.set(k, v);
+          indexState.currentStart = page.start;
+          indexState.shownEntries = page.children.length;
+          panel.webview.postMessage({
+            type: "largeRange",
+            children: page.children,
+            start: page.start,
+            large: largeFileMeta(indexState, page.start, page.children.length, count),
+          });
+        } catch (e) {
+          panel.webview.postMessage({
+            type: "largeRangeError",
+            error: e && e.message ? e.message : String(e),
+          });
+          vscode.window.showErrorMessage(
+            `Large-file mode: failed to load entry range: ${
+              e && e.message ? e.message : String(e)
+            }`
+          );
+        } finally {
+          loadingRange = false;
+        }
+      } else if (msg.type === "largeSearch" && typeof msg.query === "string") {
+        if (!indexState) return;
+        if (searchToken) searchToken.cancelled = true;
+        searchToken = { cancelled: false };
+        const seq = msg.seq;
+        const query = msg.query;
+        if (!query.trim()) {
+          panel.webview.postMessage({ type: "largeSearchCleared", seq });
+          return;
+        }
+        try {
+          const results = await searchLargeFile(
+            uri.fsPath,
+            indexState,
+            query,
+            options,
+            searchToken
+          );
+          if (searchToken.cancelled) return;
+          for (const [k, v] of results.offsets) offsetMap.set(k, v);
+          panel.webview.postMessage({
+            type: "largeSearchResults",
+            seq,
+            query,
+            tree: {
+              t: indexState.rootType,
+              c: results.children,
+            },
+            largeSearch: {
+              fileSize: indexState.fileSize,
+              rootType: indexState.rootType,
+              totalMatches: results.totalMatches,
+              shownMatches: results.children.length,
+              truncated: results.totalMatches > results.children.length,
+            },
+          });
+        } catch (e) {
+          if (searchToken.cancelled) return;
+          panel.webview.postMessage({
+            type: "largeSearchError",
+            seq,
+            error: e && e.message ? e.message : String(e),
+          });
+        }
+      }
+    },
+    undefined,
+    context.subscriptions
+  );
+
+  panel.onDidDispose(
+    () => {
+      disposed = true;
+      cancelToken.cancelled = true;
+      if (searchToken) searchToken.cancelled = true;
+      panels.delete(key);
+      indexState = null;
+      offsetMap = new Map();
     },
     null,
     context.subscriptions
@@ -503,6 +840,1223 @@ function projectNode(node, nodePath, base, map) {
   return out;
 }
 
+function projectNodeByteOffsets(node, nodePath, baseByte, text, map) {
+  const byteCache = new Map([
+    [0, 0],
+    [text.length, Buffer.byteLength(text, "utf8")],
+  ]);
+  const byteAt = (charOffset) => {
+    if (!byteCache.has(charOffset)) {
+      byteCache.set(
+        charOffset,
+        Buffer.byteLength(text.slice(0, charOffset), "utf8")
+      );
+    }
+    return byteCache.get(charOffset);
+  };
+
+  const walk = (n, p) => {
+    map.set(p, {
+      key: baseByte + byteAt(n.keyStart),
+      val: baseByte + byteAt(n.valStart),
+      end: baseByte + byteAt(n.valEnd),
+    });
+
+    const out = { t: n.type };
+    if (n.key !== undefined) out.k = n.key;
+    if (n.type === "object") {
+      out.c = n.children.map((ch) =>
+        walk(ch, p + "." + escapeKeyExt(ch.key))
+      );
+    } else if (n.type === "array") {
+      out.c = n.children.map((ch, idx) => walk(ch, p + "[" + idx + "]"));
+    } else {
+      out.r = n.raw;
+      out.v = n.value;
+    }
+    return out;
+  };
+
+  return walk(node, nodePath);
+}
+
+function isWsByte(b) {
+  return b === 32 || b === 9 || b === 10 || b === 13;
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return String(bytes);
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let n = bytes;
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+async function readUtf8Range(fileName, start, end) {
+  const handle = await fs.promises.open(fileName, "r");
+  try {
+    return await readUtf8RangeFromHandle(handle, start, end);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readUtf8RangeFromHandle(handle, start, end) {
+  const length = Math.max(0, end - start);
+  const buffer = Buffer.allocUnsafe(length);
+  const { bytesRead } = await handle.read(buffer, 0, length, start);
+  return buffer.subarray(0, bytesRead).toString("utf8");
+}
+
+async function readSourcePreview(fileName, targetStart, targetEnd, windowBytes) {
+  const stat = await fs.promises.stat(fileName);
+  const targetSize = Math.max(0, targetEnd - targetStart);
+  let start;
+  let end;
+  if (targetSize >= windowBytes) {
+    start = Math.max(0, targetStart - Math.floor(windowBytes / 4));
+    end = Math.min(stat.size, start + windowBytes);
+  } else {
+    const padding = Math.max(0, Math.floor((windowBytes - targetSize) / 2));
+    start = Math.max(0, targetStart - padding);
+    end = Math.min(stat.size, Math.max(targetEnd + padding, start + 1));
+    if (end - start > windowBytes) end = start + windowBytes;
+  }
+  const length = Math.max(0, end - start);
+  const handle = await fs.promises.open(fileName, "r");
+  let buffer;
+  try {
+    buffer = Buffer.allocUnsafe(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, start);
+    buffer = buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+
+  const highlightByteStart = Math.max(0, targetStart - start);
+  const highlightByteEnd = Math.max(
+    highlightByteStart,
+    Math.min(buffer.length, targetEnd - start)
+  );
+  const raw = buffer.toString("utf8");
+  const highlightStart = buffer.subarray(0, highlightByteStart).toString("utf8").length;
+  const highlightEnd = buffer.subarray(0, highlightByteEnd).toString("utf8").length;
+  return {
+    fileSize: stat.size,
+    windowStart: start,
+    windowEnd: end,
+    targetStart,
+    targetEnd,
+    targetTruncated: targetEnd > end || targetStart < start,
+    highlightStart,
+    highlightEnd,
+    text: raw,
+  };
+}
+
+async function readJsonKeyRange(fileName, start, end) {
+  try {
+    return JSON.parse(await readUtf8Range(fileName, start, end));
+  } catch (_e) {
+    return "key@" + start;
+  }
+}
+
+async function buildLargeFilePreview(fileName, options, onProgress, cancelToken) {
+  if (isJsoncFile(fileName)) {
+    throw new Error(
+      "Large-file mode does not support JSONC yet. Use strict .json, .jsonl, or .ndjson for large files."
+    );
+  }
+
+  if (isLineDelimitedFile(fileName)) {
+    return buildLargeJsonlPreview(fileName, options, onProgress, cancelToken);
+  }
+
+  return buildLargeJsonPreview(fileName, options, onProgress, cancelToken);
+}
+
+async function buildLargeJsonlPreview(fileName, options, onProgress, cancelToken) {
+  const stat = await fs.promises.stat(fileName);
+  const offsets = new Map();
+  const children = [];
+  const errors = [];
+  const previewLimit = options.previewEntries;
+  const pageCursors = [];
+
+  let bytesRead = 0;
+  let lastProgress = 0;
+  let carry = Buffer.alloc(0);
+  let carryStart = 0;
+  let lineNo = 1;
+  let records = 0;
+
+  const scanLine = (lineBuf, lineStart) => {
+    let start = 0;
+    let end = lineBuf.length;
+    if (end > start && lineBuf[end - 1] === 13) end--;
+    while (start < end && isWsByte(lineBuf[start])) start++;
+    while (end > start && isWsByte(lineBuf[end - 1])) end--;
+    if (start >= end) return;
+
+    const valStart = lineStart + start;
+    const valEnd = lineStart + end;
+    const text = lineBuf.subarray(start, end).toString("utf8");
+    try {
+      JSON.parse(text);
+      if (records % previewLimit === 0) {
+        pageCursors.push({ index: records, offset: valStart, line: lineNo });
+      }
+      if (children.length < previewLimit) {
+        const node = parseToTree(text);
+        const pathName = "$[" + records + "]";
+        const projected = projectNodeByteOffsets(
+          node,
+          pathName,
+          valStart,
+          text,
+          offsets
+        );
+        children.push(projected);
+      }
+      records++;
+    } catch (e) {
+      if (errors.length < 50) {
+        errors.push({ line: lineNo, message: e.message });
+      }
+    }
+  };
+
+  await new Promise((resolve, reject) => {
+    const stream = fs.createReadStream(fileName, { highWaterMark: 1024 * 1024 });
+    stream.on("data", (chunk) => {
+      if (cancelToken && cancelToken.cancelled) {
+        stream.destroy(new Error("Large-file indexing cancelled."));
+        return;
+      }
+      const buf = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+      let lineStart = carryStart;
+      let start = 0;
+      let nl;
+      while ((nl = buf.indexOf(10, start)) !== -1) {
+        scanLine(buf.subarray(start, nl), lineStart);
+        start = nl + 1;
+        lineStart = carryStart + start;
+        lineNo++;
+      }
+      carry = buf.subarray(start);
+      carryStart = lineStart;
+      bytesRead += chunk.length;
+      if (bytesRead - lastProgress >= 64 * 1024 * 1024) {
+        lastProgress = bytesRead;
+        onProgress && onProgress({ bytesRead, entries: records });
+      }
+    });
+    stream.on("error", reject);
+    stream.on("end", () => {
+      try {
+        if (carry.length) scanLine(carry, carryStart);
+        resolve();
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+
+  if (records === 0) {
+    throw new Error(
+      "No valid JSONL records found." +
+        (errors.length
+          ? "\n" + errors.map((e) => `line ${e.line}: ${e.message}`).join("\n")
+          : "")
+    );
+  }
+
+  offsets.set("$", { key: 0, val: 0, end: stat.size });
+  return {
+    tree: { t: "array", c: children },
+    offsets,
+    errors,
+    jsonl: true,
+    rootType: "array",
+    mode: "jsonl",
+    fileSize: stat.size,
+    totalEntries: records,
+    indexedEntries: children.length,
+    shownEntries: children.length,
+    truncated: records > children.length,
+    pageSize: previewLimit,
+    pageCursors,
+  };
+}
+
+async function buildLargeJsonPreview(fileName, options, onProgress, cancelToken) {
+  const stat = await fs.promises.stat(fileName);
+  const scanned = await scanLargeJsonTopLevel(
+    fileName,
+    onProgress,
+    options.previewEntries,
+    options.previewEntries,
+    cancelToken
+  );
+  const previewLimit = Math.min(options.previewEntries, scanned.entries.length);
+  const projected = await projectLargeJsonEntries(
+    fileName,
+    scanned.rootType,
+    scanned.entries.slice(0, previewLimit),
+    0,
+    options
+  );
+  const offsets = projected.offsets;
+  const children = projected.children;
+
+  offsets.set("$", {
+    key: scanned.rootStart,
+    val: scanned.rootStart,
+    end: scanned.rootEnd || stat.size,
+  });
+
+  return {
+    tree: { t: scanned.rootType, c: children },
+    offsets,
+    errors: [],
+    jsonl: false,
+    rootType: scanned.rootType,
+    mode: "json",
+    fileSize: stat.size,
+    totalEntries: scanned.totalEntries,
+    indexedEntries: scanned.entries.length,
+    shownEntries: children.length,
+    truncated: scanned.totalEntries > children.length,
+    pageSize: options.previewEntries,
+    pageCursors: scanned.pageCursors,
+  };
+}
+
+async function buildLargeFilePage(fileName, indexState, startIndex, options) {
+  if (indexState.mode === "jsonl") {
+    return buildLargeJsonlPage(fileName, indexState, startIndex, options);
+  }
+  return buildLargeJsonPage(fileName, indexState, startIndex, options);
+}
+
+function findPageCursor(indexState, startIndex) {
+  const cursors = indexState.pageCursors || [];
+  let best = null;
+  for (const cursor of cursors) {
+    if (cursor.index <= startIndex && (!best || cursor.index > best.index)) {
+      best = cursor;
+    }
+  }
+  if (!best) {
+    throw new Error(`No page cursor for entry ${startIndex}.`);
+  }
+  return best;
+}
+
+async function buildLargeJsonlPage(fileName, indexState, startIndex, options) {
+  const cursor = findPageCursor(indexState, startIndex);
+  const skip = startIndex - cursor.index;
+  const scanned = await scanLargeJsonlPageFromOffset(
+    fileName,
+    cursor.offset,
+    options.previewEntries + skip,
+    cursor.index,
+    cursor.line || 1
+  );
+  const selected = scanned.entries.slice(skip, skip + options.previewEntries);
+  const offsets = new Map();
+  const children = [];
+  for (let i = 0; i < selected.length; i++) {
+    const entry = selected[i];
+    const text = await readUtf8Range(fileName, entry.valStart, entry.valEnd);
+    const node = parseToTree(text);
+    const globalIndex = startIndex + i;
+    const projected = projectNodeByteOffsets(
+      node,
+      "$[" + globalIndex + "]",
+      entry.valStart,
+      text,
+      offsets
+    );
+    projected.k = String(globalIndex);
+    projected.i = globalIndex;
+    children.push(projected);
+  }
+  return { start: startIndex, children, offsets };
+}
+
+async function buildLargeJsonPage(fileName, indexState, startIndex, options) {
+  const cursor = findPageCursor(indexState, startIndex);
+  const skip = startIndex - cursor.index;
+  const scanned = await scanJsonTopLevelPageFromOffset(
+    fileName,
+    indexState.rootType,
+    cursor.offset,
+    options.previewEntries + skip
+  );
+  const selected = scanned.entries.slice(skip, skip + options.previewEntries);
+  const projected = await projectLargeJsonEntries(
+    fileName,
+    indexState.rootType,
+    selected,
+    startIndex,
+    options
+  );
+  return { start: startIndex, children: projected.children, offsets: projected.offsets };
+}
+
+async function scanLargeJsonlPageFromOffset(
+  fileName,
+  offset,
+  limit,
+  startRecordIndex,
+  startLineNo
+) {
+  const entries = [];
+  let carry = Buffer.alloc(0);
+  let carryStart = offset;
+  let lineNo = startLineNo;
+  let recordIndex = startRecordIndex;
+
+  const scanLine = (lineBuf, lineStart) => {
+    let start = 0;
+    let end = lineBuf.length;
+    if (end > start && lineBuf[end - 1] === 13) end--;
+    while (start < end && isWsByte(lineBuf[start])) start++;
+    while (end > start && isWsByte(lineBuf[end - 1])) end--;
+    if (start >= end) return;
+
+    const valStart = lineStart + start;
+    const valEnd = lineStart + end;
+    const text = lineBuf.subarray(start, end).toString("utf8");
+    try {
+      JSON.parse(text);
+      entries.push({ index: recordIndex, valStart, valEnd });
+      recordIndex++;
+    } catch (_e) {
+      // Keep moving; malformed lines are already summarized by the initial scan.
+    }
+  };
+
+  await new Promise((resolve, reject) => {
+    const stream = fs.createReadStream(fileName, {
+      start: offset,
+      highWaterMark: 1024 * 1024,
+    });
+    stream.on("data", (chunk) => {
+      const buf = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+      let lineStart = carryStart;
+      let start = 0;
+      let nl;
+      while ((nl = buf.indexOf(10, start)) !== -1) {
+        scanLine(buf.subarray(start, nl), lineStart);
+        if (entries.length >= limit) {
+          stream.destroy();
+          resolve();
+          return;
+        }
+        start = nl + 1;
+        lineStart = carryStart + start;
+        lineNo++;
+      }
+      carry = buf.subarray(start);
+      carryStart = lineStart;
+    });
+    stream.on("error", reject);
+    stream.on("end", () => {
+      try {
+        if (carry.length && entries.length < limit) scanLine(carry, carryStart);
+        resolve();
+      } catch (e) {
+        reject(e);
+      }
+    });
+    stream.on("close", resolve);
+  });
+
+  return { entries };
+}
+
+async function scanJsonTopLevelPageFromOffset(fileName, rootType, offset, limit) {
+  return rootType === "array"
+    ? scanJsonArrayPageFromOffset(fileName, offset, limit)
+    : scanJsonObjectPageFromOffset(fileName, offset, limit);
+}
+
+async function scanJsonArrayPageFromOffset(fileName, offset, limit) {
+  const entries = [];
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let valueStart = -1;
+  let valueEnd = -1;
+
+  const push = () => {
+    if (valueStart >= 0 && valueEnd > valueStart) {
+      entries.push({ valStart: valueStart, valEnd: valueEnd });
+    }
+    valueStart = -1;
+    valueEnd = -1;
+  };
+
+  await new Promise((resolve, reject) => {
+    const stream = fs.createReadStream(fileName, {
+      start: offset,
+      highWaterMark: 1024 * 1024,
+    });
+    stream.on("data", (chunk) => {
+      try {
+        for (let i = 0; i < chunk.length; i++) {
+          const b = chunk[i];
+          const pos = offset + i;
+
+          if (inString) {
+            valueEnd = pos + 1;
+            if (escape) escape = false;
+            else if (b === 92) escape = true;
+            else if (b === 34) inString = false;
+            continue;
+          }
+
+          if (valueStart < 0) {
+            if (isWsByte(b) || b === 44) continue;
+            if (b === 93) {
+              stream.destroy();
+              resolve();
+              return;
+            }
+            valueStart = pos;
+            valueEnd = pos + 1;
+          }
+
+          if (b === 34) {
+            inString = true;
+            valueEnd = pos + 1;
+          } else if (b === 91 || b === 123) {
+            depth++;
+            valueEnd = pos + 1;
+          } else if (b === 93 || b === 125) {
+            if (depth > 0) {
+              depth--;
+              valueEnd = pos + 1;
+            } else {
+              push();
+              stream.destroy();
+              resolve();
+              return;
+            }
+          } else if (b === 44 && depth === 0) {
+            push();
+            if (entries.length >= limit) {
+              stream.destroy();
+              resolve();
+              return;
+            }
+          } else if (!isWsByte(b)) {
+            valueEnd = pos + 1;
+          }
+        }
+        offset += chunk.length;
+      } catch (e) {
+        stream.destroy(e);
+      }
+    });
+    stream.on("error", reject);
+    stream.on("end", () => {
+      push();
+      resolve();
+    });
+    stream.on("close", resolve);
+  });
+
+  return { entries };
+}
+
+async function scanJsonObjectPageFromOffset(fileName, offset, limit) {
+  const entries = [];
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let stringRole = "";
+  let state = "key";
+  let keyStart = -1;
+  let keyEnd = -1;
+  let valueStart = -1;
+  let valueEnd = -1;
+
+  const reset = () => {
+    state = "key";
+    keyStart = -1;
+    keyEnd = -1;
+    valueStart = -1;
+    valueEnd = -1;
+  };
+
+  const push = () => {
+    if (keyStart >= 0 && valueStart >= 0 && valueEnd > valueStart) {
+      entries.push({ keyStart, keyEnd, valStart: valueStart, valEnd: valueEnd });
+    }
+    reset();
+  };
+
+  await new Promise((resolve, reject) => {
+    const stream = fs.createReadStream(fileName, {
+      start: offset,
+      highWaterMark: 1024 * 1024,
+    });
+    stream.on("data", (chunk) => {
+      try {
+        for (let i = 0; i < chunk.length; i++) {
+          const b = chunk[i];
+          const pos = offset + i;
+
+          if (inString) {
+            if (state === "value" && valueStart >= 0) valueEnd = pos + 1;
+            if (escape) escape = false;
+            else if (b === 92) escape = true;
+            else if (b === 34) {
+              inString = false;
+              if (stringRole === "key") {
+                keyEnd = pos + 1;
+                state = "colon";
+                stringRole = "";
+              }
+            }
+            continue;
+          }
+
+          if (state === "key") {
+            if (isWsByte(b) || b === 44) continue;
+            if (b === 125) {
+              stream.destroy();
+              resolve();
+              return;
+            }
+            if (b === 34) {
+              keyStart = pos;
+              inString = true;
+              stringRole = "key";
+              continue;
+            }
+            throw new Error("Expected object key while loading large JSON page.");
+          }
+
+          if (state === "colon") {
+            if (isWsByte(b)) continue;
+            if (b === 58) {
+              state = "value";
+              continue;
+            }
+            throw new Error("Expected ':' while loading large JSON page.");
+          }
+
+          if (state === "value") {
+            if (valueStart < 0) {
+              if (isWsByte(b)) continue;
+              valueStart = pos;
+              valueEnd = pos + 1;
+            }
+
+            if (b === 34) {
+              inString = true;
+              valueEnd = pos + 1;
+            } else if (b === 91 || b === 123) {
+              depth++;
+              valueEnd = pos + 1;
+            } else if (b === 93 || b === 125) {
+              if (depth > 0) {
+                depth--;
+                valueEnd = pos + 1;
+              } else {
+                push();
+                stream.destroy();
+                resolve();
+                return;
+              }
+            } else if (b === 44 && depth === 0) {
+              push();
+              if (entries.length >= limit) {
+                stream.destroy();
+                resolve();
+                return;
+              }
+            } else if (!isWsByte(b)) {
+              valueEnd = pos + 1;
+            }
+          }
+        }
+        offset += chunk.length;
+      } catch (e) {
+        stream.destroy(e);
+      }
+    });
+    stream.on("error", reject);
+    stream.on("end", () => {
+      push();
+      resolve();
+    });
+    stream.on("close", resolve);
+  });
+
+  return { entries };
+}
+
+async function searchLargeFile(fileName, indexState, query, options, cancelToken) {
+  return indexState.mode === "jsonl"
+    ? searchLargeJsonl(fileName, query, options, cancelToken)
+    : searchLargeJson(fileName, indexState, query, options, cancelToken);
+}
+
+async function searchLargeJsonl(fileName, query, options, cancelToken) {
+  const q = query.toLowerCase();
+  const offsets = new Map();
+  const children = [];
+  let totalMatches = 0;
+  let carry = Buffer.alloc(0);
+  let carryStart = 0;
+  let recordIndex = 0;
+
+  const scanLine = (lineBuf, lineStart) => {
+    let start = 0;
+    let end = lineBuf.length;
+    if (end > start && lineBuf[end - 1] === 13) end--;
+    while (start < end && isWsByte(lineBuf[start])) start++;
+    while (end > start && isWsByte(lineBuf[end - 1])) end--;
+    if (start >= end) return;
+
+    const valStart = lineStart + start;
+    const valEnd = lineStart + end;
+    const text = lineBuf.subarray(start, end).toString("utf8");
+    try {
+      JSON.parse(text);
+      const currentIndex = recordIndex++;
+      if (!text.toLowerCase().includes(q)) return;
+      totalMatches++;
+      if (children.length >= options.previewEntries) return;
+
+      const node = parseToTree(text);
+      const projected = projectNodeByteOffsets(
+        node,
+        "$[" + currentIndex + "]",
+        valStart,
+        text,
+        offsets
+      );
+      projected.k = String(currentIndex);
+      projected.i = currentIndex;
+      children.push(projected);
+    } catch (_e) {
+      // Ignore malformed lines during search; initial indexing reports samples.
+    }
+  };
+
+  await new Promise((resolve, reject) => {
+    const stream = fs.createReadStream(fileName, { highWaterMark: 1024 * 1024 });
+    stream.on("data", (chunk) => {
+      if (cancelToken && cancelToken.cancelled) {
+        stream.destroy(new Error("Large-file search cancelled."));
+        return;
+      }
+      const buf = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+      let lineStart = carryStart;
+      let start = 0;
+      let nl;
+      while ((nl = buf.indexOf(10, start)) !== -1) {
+        scanLine(buf.subarray(start, nl), lineStart);
+        start = nl + 1;
+        lineStart = carryStart + start;
+      }
+      carry = buf.subarray(start);
+      carryStart = lineStart;
+    });
+    stream.on("error", reject);
+    stream.on("end", () => {
+      try {
+        if (carry.length) scanLine(carry, carryStart);
+        resolve();
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+
+  return { children, offsets, totalMatches };
+}
+
+async function searchLargeJson(fileName, indexState, query, options, cancelToken) {
+  const q = query.toLowerCase();
+  const offsets = new Map();
+  const children = [];
+  let totalMatches = 0;
+  const pageSize = indexState.pageSize || options.previewEntries;
+  const handle = await fs.promises.open(fileName, "r");
+  try {
+    for (const cursor of indexState.pageCursors || []) {
+      if (cancelToken && cancelToken.cancelled) {
+        throw new Error("Large-file search cancelled.");
+      }
+      const scanned = await scanJsonTopLevelPageFromOffset(
+        fileName,
+        indexState.rootType,
+        cursor.offset,
+        pageSize
+      );
+      for (let i = 0; i < scanned.entries.length; i++) {
+        if (cancelToken && cancelToken.cancelled) {
+          throw new Error("Large-file search cancelled.");
+        }
+        const entry = scanned.entries[i];
+        const globalIndex = cursor.index + i;
+        let key = "";
+        if (indexState.rootType === "object") {
+          key = await readJsonKeyRange(fileName, entry.keyStart, entry.keyEnd);
+        }
+        let matched = key && key.toLowerCase().includes(q);
+        const valueSize = entry.valEnd - entry.valStart;
+        if (!matched && valueSize <= options.maxCopyBytes) {
+          const text = await readUtf8RangeFromHandle(
+            handle,
+            entry.valStart,
+            entry.valEnd
+          );
+          matched = text.toLowerCase().includes(q);
+        } else if (!matched) {
+          matched = await rangeIncludesText(
+            fileName,
+            entry.valStart,
+            entry.valEnd,
+            q,
+            cancelToken
+          );
+        }
+        if (!matched) continue;
+
+        totalMatches++;
+        if (children.length >= options.previewEntries) continue;
+        const projected = await projectLargeJsonEntries(
+          fileName,
+          indexState.rootType,
+          [entry],
+          globalIndex,
+          options
+        );
+        for (const [k, v] of projected.offsets) offsets.set(k, v);
+        children.push(projected.children[0]);
+      }
+    }
+  } finally {
+    await handle.close();
+  }
+
+  return { children, offsets, totalMatches };
+}
+
+async function rangeIncludesText(fileName, start, end, lowerQuery, cancelToken) {
+  if (!lowerQuery) return true;
+  const overlapSize = Math.max(0, lowerQuery.length - 1);
+  let carry = "";
+
+  return new Promise((resolve, reject) => {
+    const stream = fs.createReadStream(fileName, {
+      start,
+      end: Math.max(start, end - 1),
+      highWaterMark: 1024 * 1024,
+    });
+    stream.on("data", (chunk) => {
+      if (cancelToken && cancelToken.cancelled) {
+        stream.destroy(new Error("Large-file search cancelled."));
+        return;
+      }
+      const text = carry + chunk.toString("utf8").toLowerCase();
+      if (text.includes(lowerQuery)) {
+        stream.destroy();
+        resolve(true);
+        return;
+      }
+      carry = overlapSize ? text.slice(-overlapSize) : "";
+    });
+    stream.on("error", reject);
+    stream.on("end", () => resolve(false));
+    stream.on("close", () => resolve(false));
+  });
+}
+
+async function projectLargeJsonEntries(
+  fileName,
+  rootType,
+  entries,
+  startIndex,
+  options
+) {
+  const offsets = new Map();
+  const children = [];
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    const globalIndex = startIndex + i;
+    let entryKey = entry.key;
+    if (rootType === "object") {
+      entryKey = await readJsonKeyRange(fileName, entry.keyStart, entry.keyEnd);
+    }
+    const nodePath =
+      rootType === "array"
+        ? "$[" + globalIndex + "]"
+        : "$." + escapeKeyExt(entryKey);
+    let projected;
+    const entrySize = entry.valEnd - entry.valStart;
+    if (entrySize > options.maxCopyBytes) {
+      projected = {
+        t: "string",
+        k: rootType === "array" ? String(globalIndex) : entryKey,
+        i: rootType === "array" ? globalIndex : undefined,
+        r: `"<${formatBytes(entrySize)} value>"`,
+        v: `<${formatBytes(entrySize)} value>`,
+      };
+      offsets.set(nodePath, {
+        key: rootType === "object" ? entry.keyStart : entry.valStart,
+        val: entry.valStart,
+        end: entry.valEnd,
+      });
+    } else {
+      const text = await readUtf8Range(fileName, entry.valStart, entry.valEnd);
+      let node;
+      try {
+        JSON.parse(text);
+        node = parseToTree(text);
+      } catch (e) {
+        throw new Error(
+          `Invalid JSON value at byte ${entry.valStart}: ${
+            e && e.message ? e.message : String(e)
+          }`
+        );
+      }
+      projected = projectNodeByteOffsets(
+        node,
+        nodePath,
+        entry.valStart,
+        text,
+        offsets
+      );
+      if (rootType === "array") {
+        projected.k = String(globalIndex);
+        projected.i = globalIndex;
+      }
+    }
+    if (rootType === "object") {
+      projected.k = entryKey;
+      offsets.set(nodePath, {
+        key: entry.keyStart,
+        val: entry.valStart,
+        end: entry.valEnd,
+      });
+    }
+    children.push(projected);
+  }
+
+  return { children, offsets };
+}
+
+async function scanLargeJsonTopLevel(
+  fileName,
+  onProgress,
+  maxStoredEntries = Infinity,
+  pageSize = maxStoredEntries,
+  cancelToken
+) {
+  const entries = [];
+  const pageCursors = [];
+  let totalEntries = 0;
+  let rootType = null;
+  let rootStart = 0;
+  let rootEnd = 0;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let stringRole = "";
+  let bytesRead = 0;
+  let lastProgress = 0;
+
+  let arrayValueStart = -1;
+  let arrayValueEnd = -1;
+  let arrayAfterComma = false;
+
+  let objectState = "key";
+  let keyStart = -1;
+  let keyEnd = -1;
+  let objectValueStart = -1;
+  let objectValueEnd = -1;
+  let objectAfterComma = false;
+
+  const resetObjectEntry = () => {
+    objectState = "key";
+    keyStart = -1;
+    keyEnd = -1;
+    objectValueStart = -1;
+    objectValueEnd = -1;
+  };
+
+  const pushArrayEntry = () => {
+    if (arrayValueStart >= 0 && arrayValueEnd > arrayValueStart) {
+      if (pageSize > 0 && totalEntries % pageSize === 0) {
+        pageCursors.push({ index: totalEntries, offset: arrayValueStart });
+      }
+      totalEntries++;
+      if (entries.length < maxStoredEntries) {
+        entries.push({ valStart: arrayValueStart, valEnd: arrayValueEnd });
+      }
+      arrayAfterComma = false;
+    }
+    arrayValueStart = -1;
+    arrayValueEnd = -1;
+  };
+
+  const pushObjectEntry = () => {
+    if (keyStart >= 0 && objectValueStart >= 0 && objectValueEnd > objectValueStart) {
+      if (pageSize > 0 && totalEntries % pageSize === 0) {
+        pageCursors.push({ index: totalEntries, offset: keyStart });
+      }
+      totalEntries++;
+      if (entries.length < maxStoredEntries) {
+        entries.push({
+          keyStart,
+          keyEnd,
+          valStart: objectValueStart,
+          valEnd: objectValueEnd,
+        });
+      }
+      objectAfterComma = false;
+    }
+    resetObjectEntry();
+  };
+
+  await new Promise((resolve, reject) => {
+    const stream = fs.createReadStream(fileName, { highWaterMark: 1024 * 1024 });
+    stream.on("data", (chunk) => {
+      try {
+        if (cancelToken && cancelToken.cancelled) {
+          stream.destroy(new Error("Large-file indexing cancelled."));
+          return;
+        }
+        for (let i = 0; i < chunk.length; i++) {
+          const b = chunk[i];
+          const pos = bytesRead + i;
+          if (rootEnd) {
+            if (!isWsByte(b)) {
+              throw new Error("Unexpected content after JSON root.");
+            }
+            continue;
+          }
+
+          if (inString) {
+            if (rootType === "array" && arrayValueStart >= 0) {
+              arrayValueEnd = pos + 1;
+            } else if (
+              rootType === "object" &&
+              objectState === "value" &&
+              objectValueStart >= 0
+            ) {
+              objectValueEnd = pos + 1;
+            }
+
+            if (escape) {
+              escape = false;
+            } else if (b === 92) {
+              escape = true;
+            } else if (b === 34) {
+              inString = false;
+              if (stringRole === "objectKey") {
+                keyEnd = pos + 1;
+                objectState = "colon";
+                stringRole = "";
+              }
+            }
+            continue;
+          }
+
+          if (!rootType) {
+            if (isWsByte(b)) continue;
+            if (b === 91) {
+              rootType = "array";
+              rootStart = pos;
+              depth = 1;
+              continue;
+            }
+            if (b === 123) {
+              rootType = "object";
+              rootStart = pos;
+              depth = 1;
+              continue;
+            }
+            throw new Error("Large-file mode supports JSON arrays or objects at the root.");
+          }
+
+          if (rootType === "array") {
+            if (depth === 1) {
+              if (arrayValueStart < 0 && b === 44) {
+                throw new Error("Unexpected comma while indexing large JSON array.");
+              }
+              if (arrayValueStart < 0 && b === 93) {
+                if (arrayAfterComma) {
+                  throw new Error("Trailing comma while indexing large JSON array.");
+                }
+                rootEnd = pos + 1;
+                depth = 0;
+                continue;
+              }
+              if (arrayValueStart < 0 && !isWsByte(b)) {
+                arrayValueStart = pos;
+                arrayValueEnd = pos + 1;
+                arrayAfterComma = false;
+              }
+              if (b === 34) {
+                inString = true;
+                if (arrayValueStart < 0) arrayValueStart = pos;
+                arrayValueEnd = pos + 1;
+                continue;
+              }
+              if (b === 91 || b === 123) {
+                if (arrayValueStart < 0) arrayValueStart = pos;
+                depth++;
+                arrayValueEnd = pos + 1;
+                continue;
+              }
+              if (b === 44) {
+                pushArrayEntry();
+                arrayAfterComma = true;
+                continue;
+              }
+              if (b === 93) {
+                pushArrayEntry();
+                rootEnd = pos + 1;
+                depth = 0;
+                continue;
+              }
+              if (arrayValueStart >= 0 && !isWsByte(b)) arrayValueEnd = pos + 1;
+              continue;
+            }
+
+            if (b === 34) {
+              inString = true;
+              arrayValueEnd = pos + 1;
+            } else if (b === 91 || b === 123) {
+              depth++;
+              arrayValueEnd = pos + 1;
+            } else if (b === 93 || b === 125) {
+              depth--;
+              arrayValueEnd = pos + 1;
+            } else {
+              arrayValueEnd = pos + 1;
+            }
+            continue;
+          }
+
+          if (rootType === "object") {
+            if (depth === 1) {
+              if (objectState === "key") {
+                if (isWsByte(b)) continue;
+                if (b === 44) {
+                  throw new Error("Unexpected comma while indexing large JSON object.");
+                }
+                if (b === 125) {
+                  if (objectAfterComma) {
+                    throw new Error("Trailing comma while indexing large JSON object.");
+                  }
+                  rootEnd = pos + 1;
+                  depth = 0;
+                  continue;
+                }
+                if (b === 34) {
+                  objectAfterComma = false;
+                  keyStart = pos;
+                  inString = true;
+                  stringRole = "objectKey";
+                  continue;
+                }
+                throw new Error("Expected object key while indexing large JSON.");
+              }
+
+              if (objectState === "colon") {
+                if (isWsByte(b)) continue;
+                if (b === 58) {
+                  objectState = "value";
+                  continue;
+                }
+                throw new Error("Expected ':' while indexing large JSON object.");
+              }
+
+              if (objectState === "value") {
+                if (objectValueStart < 0) {
+                  if (isWsByte(b)) continue;
+                  objectValueStart = pos;
+                  objectValueEnd = pos + 1;
+                }
+                if (b === 34) {
+                  inString = true;
+                  objectValueEnd = pos + 1;
+                  continue;
+                }
+                if (b === 91 || b === 123) {
+                  depth++;
+                  objectValueEnd = pos + 1;
+                  continue;
+                }
+                if (b === 44) {
+                  pushObjectEntry();
+                  objectAfterComma = true;
+                  continue;
+                }
+                if (b === 125) {
+                  pushObjectEntry();
+                  rootEnd = pos + 1;
+                  depth = 0;
+                  continue;
+                }
+                if (!isWsByte(b)) objectValueEnd = pos + 1;
+                continue;
+              }
+            }
+
+            if (b === 34) {
+              inString = true;
+              objectValueEnd = pos + 1;
+            } else if (b === 91 || b === 123) {
+              depth++;
+              objectValueEnd = pos + 1;
+            } else if (b === 93 || b === 125) {
+              depth--;
+              objectValueEnd = pos + 1;
+            } else {
+              objectValueEnd = pos + 1;
+            }
+          }
+        }
+
+        bytesRead += chunk.length;
+        if (bytesRead - lastProgress >= 64 * 1024 * 1024) {
+          lastProgress = bytesRead;
+          onProgress && onProgress({ bytesRead, entries: totalEntries });
+        }
+      } catch (e) {
+        stream.destroy(e);
+      }
+    });
+    stream.on("error", reject);
+    stream.on("end", resolve);
+  });
+
+  if (!rootType) throw new Error("No JSON root value found.");
+  if (inString) throw new Error("Unterminated string while indexing large JSON.");
+  if (!rootEnd || depth !== 0) {
+    throw new Error("Unexpected end of JSON while indexing large JSON.");
+  }
+  return { rootType, rootStart, rootEnd, entries, totalEntries, pageCursors };
+}
+
 function getHtml(webview, expandLevel) {
   const nonce = String(Date.now()) + Math.random().toString(36).slice(2);
   const csp = [
@@ -524,10 +2078,25 @@ function getHtml(webview, expandLevel) {
     <input id="search" type="text" placeholder="Filter by key or value…" />
     <span id="matchCount" class="muted"></span>
     <span class="spacer"></span>
+    <div id="rangeControls" class="range-controls" hidden>
+      <button id="prevPage" title="Previous entry range">Prev</button>
+      <input id="rangeStart" type="number" min="0" step="1" placeholder="Start" title="Start index" />
+      <input id="rangeCount" type="number" min="1" step="1" placeholder="Count" title="Entry count" />
+      <button id="goRange" title="Load entry range">Go</button>
+      <button id="nextPage" title="Next entry range">Next</button>
+    </div>
     <button id="expandAll" title="Expand all">Expand all</button>
     <button id="collapseAll" title="Collapse all">Collapse all</button>
   </div>
   <div id="status" class="muted"></div>
+  <div id="sourcePreview" hidden>
+    <div class="source-head">
+      <span id="sourceTitle"></span>
+      <button id="closeSourcePreview" title="Close source preview">Close</button>
+      <button id="copySourceRange" title="Copy byte range">Copy range</button>
+    </div>
+    <pre id="sourceText"></pre>
+  </div>
   <div id="tree"></div>
   <script nonce="${nonce}">
     const AUTO_EXPAND_LEVEL = ${Number(expandLevel) || 0};
@@ -555,6 +2124,7 @@ body {
   top: 0;
   z-index: 2;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
@@ -562,13 +2132,24 @@ body {
   border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.3));
 }
 #toolbar .spacer { flex: 1; }
-#search {
+#search,
+.range-controls input {
   flex: 0 1 320px;
   padding: 3px 8px;
   color: var(--vscode-input-foreground);
   background: var(--vscode-input-background);
   border: 1px solid var(--vscode-input-border, transparent);
   border-radius: 3px;
+}
+.range-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.range-controls[hidden] { display: none; }
+.range-controls input {
+  flex: 0 0 86px;
+  width: 86px;
 }
 button {
   padding: 3px 10px;
@@ -582,6 +2163,32 @@ button:hover { background: var(--vscode-button-hoverBackground); }
 .muted { color: var(--vscode-descriptionForeground); }
 #status { padding: 6px 10px; }
 #tree { padding: 4px 0 40px; }
+#sourcePreview {
+  margin: 8px 10px;
+  border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.3));
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+}
+.source-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.3));
+}
+#sourceTitle { flex: 1; color: var(--vscode-descriptionForeground); }
+#sourceText {
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.source-hit {
+  color: var(--vscode-editor-foreground);
+  background: var(--vscode-editor-findMatchHighlightBackground, rgba(234,92,0,0.35));
+  outline: 1px solid var(--vscode-editor-findMatchBorder, rgba(234,92,0,0.6));
+}
 
 .row {
   display: flex;
@@ -677,9 +2284,25 @@ const treeEl = document.getElementById("tree");
 const statusEl = document.getElementById("status");
 const searchEl = document.getElementById("search");
 const matchCountEl = document.getElementById("matchCount");
+const rangeControlsEl = document.getElementById("rangeControls");
+const prevPageBtn = document.getElementById("prevPage");
+const nextPageBtn = document.getElementById("nextPage");
+const rangeStartEl = document.getElementById("rangeStart");
+const rangeCountEl = document.getElementById("rangeCount");
+const goRangeBtn = document.getElementById("goRange");
+const sourcePreviewEl = document.getElementById("sourcePreview");
+const sourceTitleEl = document.getElementById("sourceTitle");
+const sourceTextEl = document.getElementById("sourceText");
+const copySourceRangeBtn = document.getElementById("copySourceRange");
+let lastSourceRange = "";
 
 let model = null;       // root node
+let normalModel = null;
 let filterText = "";
+let largeMeta = null;
+let loadingRange = false;
+let largeSearchSeq = 0;
+let backendSearchActive = false;
 
 // Wrap the lean tree from the extension (nodes: {t,r,k?,v?,c?}) into the render
 // model, adding stable ids, depth, paths, and expand state. The raw source text
@@ -704,9 +2327,11 @@ function wrap(n, key, path, depth) {
   } else if (n.t === "array") {
     // Zero-pad indices so long lists still scan in numeric order.
     const pad = String(Math.max(0, n.c.length - 1)).length;
-    node.children = n.c.map((ch, i) =>
-      wrap(ch, String(i).padStart(pad, "0"), path + "[" + i + "]", depth + 1)
-    );
+    node.children = n.c.map((ch, i) => {
+      const index = typeof ch.i === "number" ? ch.i : i;
+      const key = ch.k !== undefined ? String(ch.k) : String(index).padStart(pad, "0");
+      return wrap(ch, key, path + "[" + index + "]", depth + 1);
+    });
   }
   return node;
 }
@@ -758,6 +2383,15 @@ function skeleton(node) {
   if (node.type === "object") {
     const o = {};
     for (const c of node.children) o[c.key] = skeleton(c);
+    if (
+      largeMeta &&
+      node.path === "$" &&
+      node.children &&
+      node.children.length < (largeMeta.totalEntries || 0)
+    ) {
+      o.__jsonViewerOmittedTopLevelEntries =
+        (largeMeta.totalEntries || 0) - node.children.length;
+    }
     return o;
   }
   if (node.type === "array") {
@@ -861,7 +2495,7 @@ function computeFilter(node, q) {
 function render() {
   treeEl.innerHTML = "";
   if (!model) return;
-  const q = filterText.trim().toLowerCase();
+  const q = backendSearchActive ? "" : filterText.trim().toLowerCase();
   let matches = 0;
   if (q) {
     computeFilter(model, q);
@@ -946,20 +2580,151 @@ document.getElementById("collapseAll").addEventListener("click", () => {
   if (model) { setAll(model, false); model.expanded = true; render(); }
 });
 
+document.getElementById("closeSourcePreview").addEventListener("click", () => {
+  sourcePreviewEl.hidden = true;
+});
+
+copySourceRangeBtn.addEventListener("click", () => {
+  if (lastSourceRange) vscode.postMessage({ type: "copy", value: lastSourceRange, label: "byte range" });
+});
+
+function requestLargeRange(start, count) {
+  if (!largeMeta || loadingRange) return;
+  const total = largeMeta.totalEntries || 0;
+  if (total <= 0) return;
+  const maxCount = largeMeta.pageSize || largeMeta.shownEntries || 1;
+  const nextStart = clampClientInt(start, 0, total - 1, largeMeta.pageStart || 0);
+  const nextCount = clampClientInt(count, 1, maxCount, maxCount);
+  rangeStartEl.value = String(nextStart);
+  rangeCountEl.value = String(nextCount);
+  loadingRange = true;
+  updateRangeControls();
+  statusEl.textContent = "Large file mode: loading entry range...";
+  vscode.postMessage({ type: "largeLoadRange", start: nextStart, count: nextCount });
+}
+
+function currentRangeCount() {
+  return clampClientInt(
+    rangeCountEl.value,
+    1,
+    largeMeta ? largeMeta.pageSize || 1 : 1,
+    largeMeta ? largeMeta.pageCount || largeMeta.pageSize || 1 : 1
+  );
+}
+
+goRangeBtn.addEventListener("click", () => {
+  requestLargeRange(rangeStartEl.value, currentRangeCount());
+});
+rangeStartEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") requestLargeRange(rangeStartEl.value, currentRangeCount());
+});
+rangeCountEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") requestLargeRange(rangeStartEl.value, currentRangeCount());
+});
+prevPageBtn.addEventListener("click", () => {
+  if (!largeMeta) return;
+  const count = currentRangeCount();
+  requestLargeRange((largeMeta.pageStart || 0) - count, count);
+});
+nextPageBtn.addEventListener("click", () => {
+  if (!largeMeta) return;
+  const count = currentRangeCount();
+  requestLargeRange(largeMeta.pageEnd || (largeMeta.pageStart || 0) + count, count);
+});
+
 let searchTimer;
 searchEl.addEventListener("input", () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     filterText = searchEl.value;
-    render();
+    if (largeMeta) {
+      const q = filterText.trim();
+      largeSearchSeq++;
+      if (!q) {
+        backendSearchActive = false;
+        model = normalModel;
+        updateLargeStatus();
+        updateRangeControls();
+        render();
+      } else {
+        backendSearchActive = true;
+        rangeControlsEl.hidden = true;
+        statusEl.textContent = "Large file mode: searching...";
+        vscode.postMessage({ type: "largeSearch", query: q, seq: largeSearchSeq });
+      }
+    } else {
+      backendSearchActive = false;
+      render();
+    }
   }, 120);
 });
 
 window.addEventListener("message", (event) => {
   const msg = event.data;
+  if (msg.type === "largeStatus") {
+    statusEl.textContent = msg.text || "Large file mode...";
+    return;
+  }
+  if (msg.type === "sourcePreview") {
+    showSourcePreview(msg);
+    return;
+  }
+  if (msg.type === "largeRange") {
+    if (!normalModel || !normalModel.children) return;
+    largeMeta = msg.large || largeMeta;
+    replaceLargeChildren(msg.children || [], msg.start || 0);
+    if (!filterText.trim()) model = normalModel;
+    loadingRange = false;
+    updateLargeStatus();
+    updateRangeControls();
+    render();
+    return;
+  }
+  if (msg.type === "largeSearchResults") {
+    if (msg.seq !== largeSearchSeq) return;
+    backendSearchActive = true;
+    idSeq = 0;
+    const q = msg.query || "";
+    model = wrap(msg.tree, "Search: " + q, "$", 0);
+    model.expanded = true;
+    const info = msg.largeSearch || {};
+    statusEl.textContent =
+      "Large file search · " +
+      (info.totalMatches || 0).toLocaleString() + " match" +
+      ((info.totalMatches || 0) === 1 ? "" : "es") +
+      " · showing " + (info.shownMatches || 0).toLocaleString();
+    updateRangeControls();
+    rangeControlsEl.hidden = true;
+    render();
+    return;
+  }
+  if (msg.type === "largeSearchError") {
+    if (msg.seq !== largeSearchSeq) return;
+    backendSearchActive = false;
+    statusEl.textContent = "Large file search: " + (msg.error || "failed");
+    updateRangeControls();
+    return;
+  }
+  if (msg.type === "largeSearchCleared") {
+    if (msg.seq !== largeSearchSeq) return;
+    backendSearchActive = false;
+    model = normalModel;
+    updateLargeStatus();
+    updateRangeControls();
+    render();
+    return;
+  }
+  if (msg.type === "largeRangeError") {
+    loadingRange = false;
+    updateRangeControls();
+    if (msg.error) statusEl.textContent = "Large file mode: " + msg.error;
+    return;
+  }
   if (msg.type === "load") {
     if (!msg.ok) {
       model = null;
+      normalModel = null;
+      largeMeta = null;
       treeEl.innerHTML = "";
       statusEl.innerHTML = "";
       const err = document.createElement("div");
@@ -969,11 +2734,16 @@ window.addEventListener("message", (event) => {
       return;
     }
     idSeq = 0;
+    largeMeta = msg.large || null;
+    backendSearchActive = false;
     model = wrap(msg.tree, msg.name || "root", "$", 0);
+    normalModel = model;
     model.expanded = true;
     statusEl.innerHTML = "";
 
-    if (msg.jsonl) {
+    if (msg.large) {
+      updateLargeStatus();
+    } else if (msg.jsonl) {
       // Top level is a list of records; zero-padded indices already read 000…
       const n = model.children ? model.children.length : 0;
       const errCount = (msg.errors || []).length;
@@ -994,9 +2764,100 @@ window.addEventListener("message", (event) => {
       statusEl.textContent =
         "Root: " + t + (model.children ? " · " + size + " top-level entries" : "");
     }
+    updateRangeControls();
     render();
   }
 });
+
+function replaceLargeChildren(children, start) {
+  normalModel.children = [];
+  for (let i = 0; i < children.length; i++) {
+    const child = children[i];
+    const globalIndex = start + i;
+    const key = normalModel.type === "array" ? String(globalIndex) : child.k;
+    const childPath =
+      normalModel.type === "array"
+        ? "$[" + globalIndex + "]"
+        : "$." + escapeKey(key);
+    normalModel.children.push(wrap(child, key, childPath, 1));
+  }
+  normalModel.expanded = true;
+}
+
+function updateLargeStatus() {
+  if (!largeMeta) return;
+  const total = largeMeta.totalEntries || 0;
+  const shown = largeMeta.shownEntries || 0;
+  const start = largeMeta.pageStart || 0;
+  const end = largeMeta.pageEnd || start + shown;
+  const range = shown > 0
+    ? start.toLocaleString() + "-" + Math.max(start, end - 1).toLocaleString()
+    : "empty";
+  statusEl.textContent =
+    "Large file mode · " +
+    formatClientBytes(largeMeta.fileSize || 0) +
+    " · root " + largeMeta.rootType +
+    " · " + total.toLocaleString() + " top-level " +
+    (total === 1 ? "entry" : "entries") +
+    " · entries " + range + " of " + total.toLocaleString();
+}
+
+function updateRangeControls() {
+  if (!largeMeta || filterText.trim() || backendSearchActive) {
+    rangeControlsEl.hidden = true;
+    return;
+  }
+  const total = largeMeta.totalEntries || 0;
+  const pageSize = largeMeta.pageSize || largeMeta.shownEntries || 1;
+  const pageCount = largeMeta.pageCount || pageSize;
+  rangeControlsEl.hidden = total <= 0;
+  rangeStartEl.max = String(Math.max(0, total - 1));
+  rangeCountEl.max = String(pageSize);
+  if (!loadingRange) {
+    rangeStartEl.value = String(largeMeta.pageStart || 0);
+    rangeCountEl.value = String(pageCount);
+  }
+  prevPageBtn.disabled = loadingRange || !largeMeta.canPrevious;
+  nextPageBtn.disabled = loadingRange || !largeMeta.canNext;
+  goRangeBtn.disabled = loadingRange;
+  rangeStartEl.disabled = loadingRange;
+  rangeCountEl.disabled = loadingRange;
+}
+
+function showSourcePreview(msg) {
+  const text = msg.text || "";
+  const start = Math.max(0, Math.min(text.length, msg.highlightStart || 0));
+  const end = Math.max(start, Math.min(text.length, msg.highlightEnd || start));
+  lastSourceRange = String(msg.targetStart) + "-" + String(msg.targetEnd);
+  sourceTitleEl.textContent =
+    (msg.path || "source") +
+    " · bytes " + lastSourceRange +
+    " · window " + msg.windowStart + "-" + msg.windowEnd +
+    (msg.targetTruncated ? " · target truncated" : "");
+  sourceTextEl.textContent = "";
+  sourceTextEl.appendChild(document.createTextNode(text.slice(0, start)));
+  const hit = document.createElement("span");
+  hit.className = "source-hit";
+  hit.textContent = text.slice(start, end) || " ";
+  sourceTextEl.appendChild(hit);
+  sourceTextEl.appendChild(document.createTextNode(text.slice(end)));
+  sourcePreviewEl.hidden = false;
+  hit.scrollIntoView({ block: "center", inline: "nearest" });
+}
+
+function clampClientInt(value, min, max, fallback) {
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(n, max));
+}
+
+function formatClientBytes(bytes) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let n = Number(bytes) || 0;
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i === 0 ? 0 : 1) + " " + units[i];
+}
 
 vscode.postMessage({ type: "ready" });
 `;
@@ -1010,5 +2871,11 @@ module.exports = {
     jsoncToJson,
     parseDocumentText,
     parseToTree,
+    buildLargeFilePreview,
+    buildLargeFilePage,
+    searchLargeFile,
+    readSourcePreview,
+    scanLargeJsonTopLevel,
+    shouldUseLargeFileMode,
   },
 };

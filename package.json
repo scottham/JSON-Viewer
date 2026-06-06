@@ -2,12 +2,13 @@
   "name": "json-viewer-tree-inspector",
   "displayName": "JSON Viewer: Tree Inspector",
   "description": "View JSON/dict files as an interactive, expandable IDE debugger-style variable-inspector tree.",
-  "version": "0.1.6",
+  "version": "0.1.8",
   "publisher": "prokids",
   "icon": "media/icon.png",
   "license": "MIT",
   "scripts": {
-    "test": "node test-parser.js"
+    "test": "node test-parser.js",
+    "test:large": "node scripts/measure-large-file-memory.js sample-large-1gb.json 1000 900000 record-0000002000"
   },
   "repository": {
     "type": "git",
@@ -83,6 +84,26 @@
           "type": "boolean",
           "default": true,
           "description": "Re-parse and refresh the viewer as the underlying document changes."
+        },
+        "jsonViewer.largeFileThresholdMb": {
+          "type": "number",
+          "default": 45,
+          "description": "Local .json, .jsonl, and .ndjson files at or above this size use large-file mode to avoid VS Code's extension document sync limit. Set to 0 to always use large-file mode for supported local files, or a negative value to disable it."
+        },
+        "jsonViewer.largeFilePreviewEntries": {
+          "type": "number",
+          "default": 1000,
+          "description": "Large-file mode: maximum number of top-level JSON/JSONL entries to parse and render in one visible range."
+        },
+        "jsonViewer.largeFileMaxCopyMb": {
+          "type": "number",
+          "default": 32,
+          "description": "Large-file mode: maximum value size that can be copied from source text in one action."
+        },
+        "jsonViewer.largeFileSourcePreviewKb": {
+          "type": "number",
+          "default": 64,
+          "description": "Large-file mode: source bytes to read around a value when using Jump to source."
         }
       }
     }
